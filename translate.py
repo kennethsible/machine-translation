@@ -77,22 +77,6 @@ class LogSoftmax(torch.nn.Module):
         z = self.W @ input
         return torch.log_softmax(z, dim=-1)
 
-class Linear(torch.nn.Module):
-
-    def __init__(self, input_size, output_size, bias=True):
-        super().__init__()
-        self.W = torch.nn.Parameter(torch.empty(output_size, input_size))
-        self.b = torch.nn.Parameter(torch.empty(output_size))
-        torch.nn.init.normal_(self.W, std=0.01)
-        torch.nn.init.normal_(self.b, std=0.01)
-        self.bias = bias
-
-    def forward(self, input):
-        v = input.squeeze(0)
-        z = self.W @ v
-        if self.bias: z += self.b
-        return z.unsqueeze(0)
-
 class RNNCell(torch.nn.Module):
     
     def __init__(self, input_size, hidden_size):
@@ -153,7 +137,6 @@ class Decoder(torch.nn.Module):
     def start(self, h_seq):
         h = self.rnn.h0
         return (h, h_seq) # (h, h_seq[-1])
-        # return (c, c.clone().detach())
 
     def input(self, state, tgt_num):
         h, h_seq = state
@@ -212,27 +195,28 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--train', type=str, help='training data')
-    parser.add_argument('--dev', type=str, help='development data')
     parser.add_argument('infile', nargs='?', type=str, help='test data to translate')
     parser.add_argument('-o', '--outfile', type=str, help='write translations to file')
     parser.add_argument('--load', type=str, help='load model from file')
     parser.add_argument('--save', type=str, help='save model in file')
     args = parser.parse_args()
 
+    seq_len, data_limit = 7, 12500 # len(train_data)
+
     if args.train:
         train_data = []
         for line in open(args.train):
             lsplit = line.split('\t')
             src_line, tgt_line = lsplit[0].lower(), lsplit[1].lower()
-            src_words = src_line.split() + ['<SEP>'] # TODO <EOS>
+            src_words = src_line.split() + ['<SEP>']
             tgt_words = tgt_line.split() + ['<EOS>']
-            # if len(src_words) < 7: # TODO
-            train_data.append((src_words, tgt_words))
-        selection  = train_data[:]
-        train_data = selection[:10000]
-        dev_data   = selection[10000:12000]
+            if not seq_len or len(src_words) < seq_len:
+                train_data.append((src_words, tgt_words))
+        split = math.ceil(0.8 * data_limit)
+        val_data = train_data[split:data_limit]
+        train_data = train_data[:split]
 
-        vocab_size, hidden_size, epoch_count = 15000, 512, 30 # TODO
+        vocab_size, hidden_size, epoch_count, lr = 15000, 256, 1, 1e-4
 
         src_count, tgt_count = Counter(), Counter()
         src_vocab, tgt_vocab = Vocab(), Vocab()
@@ -245,30 +229,12 @@ if __name__ == "__main__":
             src_vocab.add(word)
         for word, _ in tgt_count.most_common(vocab_size):
             tgt_vocab.add(word)
-        # for src_words, tgt_words in train_data:
-        #     src_vocab |= src_words
-        #     tgt_vocab |= tgt_words
 
         model = Model(src_vocab, tgt_vocab, hidden_size).to(device)
-
-        # if not args.dev:
-        #     raise ValueError('--dev required')
-        # dev_data = []
-        # with open('tmp_file.txt', 'w') as f:
-        #     for src_words, tgt_words in dev_data:
-        #         f.write("%s <SEP> %s\n" % (src_words, tgt_words))
-        # for line in open(args.dev):
-        #     lsplit = line.split('\t')
-        #     src_line, tgt_line = lsplit[0], lsplit[1]
-        #     src_words = src_line.split() + ['<EOS>']
-        #     tgt_words = tgt_line.split() + ['<EOS>']
-        #     dev_data.append((src_words, tgt_words))
 
     elif args.load:
         if args.save:
             raise ValueError('--save can only be used with --train')
-        if args.dev:
-            raise ValueError('--dev can only be used with --train')
         model = torch.load(args.load)
 
     else: raise ValueError('either --train or --load required')
@@ -277,9 +243,9 @@ if __name__ == "__main__":
         raise ValueError('-o required')
 
     if args.train:
-        opt = torch.optim.Adam(model.parameters(), lr=0.0003) # TODO lr=1e-4
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
 
-        best_dev_loss = None
+        best_val_loss = None
         for epoch in range(epoch_count):
             random.shuffle(train_data)
 
@@ -292,55 +258,53 @@ if __name__ == "__main__":
                 train_loss += loss.item()
                 train_tgt_words += len(tgt_words)
             
-            dev_loss, dev_tgt_words = 0., 0.
-            X, Y = [], []
-            for line_num, (src_words, tgt_words) in enumerate(dev_data):
-                dev_loss += model(src_words, tgt_words).item()
-                dev_tgt_words += len(tgt_words)
-                # if line_num < 1:
-                #     translation = model.translate(src_words)
-                #     print('>', ' '.join(tgt_words[:-1]))
-                #     print('<', ' '.join(translation))
+            candidate, reference = [], []
+            val_loss, val_tgt_words = 0., 0.
+            for line_num, (src_words, tgt_words) in enumerate(val_data):
+                val_loss += model(src_words, tgt_words).item()
+                val_tgt_words += len(tgt_words)
                 translation = model.translate(src_words)
-                X.append(translation)
-                Y.append([tgt_words[:-1]])
+                candidate.append(translation)
+                reference.append([tgt_words[:-1]])
+            score = bleu_score(candidate, reference)
 
-            print(f'[{epoch + 1}] train_loss={train_loss} train_ppl={math.exp(train_loss/train_tgt_words)} dev_loss={dev_loss} dev_ppl={math.exp(dev_loss/dev_tgt_words)} dev_bleu={bleu_score(X, Y)}', flush=True)
+            print(f'[{epoch + 1}] train_loss={train_loss} train_ppl={math.exp(train_loss/train_tgt_words)} val_loss={val_loss} val_ppl={math.exp(val_loss/val_tgt_words)} val_score={score}', flush=True)
 
-            if best_dev_loss is None or dev_loss < best_dev_loss:
+            if best_val_loss is None or val_loss < best_val_loss:
                 print('saving best model...')
                 best_model = copy.deepcopy(model)
                 if args.save:
                     torch.save(model, args.save)
-                best_dev_loss = dev_loss
+                best_val_loss = val_loss
             print()
 
         model = best_model
 
-        # with open(args.outfile, 'w') as outfile:
-        #     test_data = []
-        #     for line in open(args.infile):
-        #         lsplit = line.split('\t')
-        #         src_line, tgt_line = lsplit[0].lower(), lsplit[1].lower()
-        #         src_words = src_line.split() + ['<SEP>']
-        #         tgt_words = tgt_line.split()
-        #         if len(src_words) < 5:
-        #             test_data.append((src_words, tgt_words))
-        #     X, Y = [], []
-        #     for src_words, tgt_words in test_data:
-        #         translation = model.translate(src_words)
-        #         X.append(translation)
-        #         Y.append([tgt_words])
-        #         print(' '.join(tgt_words) + '\n' + ' '.join(translation) + '\n', file=outfile)
-        #     print(f'bleu_score={bleu_score(X, Y)}')
+        with open(args.outfile, 'w') as outfile:
+            test_data = []
+            for line in open(args.infile):
+                lsplit = line.split('\t')
+                src_line, tgt_line = lsplit[0].lower(), lsplit[1].lower()
+                src_words = src_line.split() + ['<SEP>']
+                tgt_words = tgt_line.split()
+                if not seq_len or len(src_words) < seq_len:
+                    test_data.append((src_words, tgt_words))
+            candidate, reference = [], []
+            for src_words, tgt_words in test_data:
+                translation = model.translate(src_words)
+                candidate.append(translation)
+                reference.append([tgt_words])
+                print(' '.join(tgt_words) + '\n' + ' '.join(translation) + '\n', file=outfile)
+            score = bleu_score(candidate, reference)
+            print(f'test_score={score}')
 
     elif args.infile:
         with open(args.outfile, 'w') as outfile:
             test_data = []
             for line in open(args.infile):
                 words = line.lower().split() + ['<SEP>']
-                # if len(words) < 7: # TODO
-                #     test_data.append(words)
+                if not seq_len or len(words) < seq_len:
+                    test_data.append(words)
             for words in test_data:
                 translation = model.translate(words)
                 print(' '.join(translation), file=outfile)

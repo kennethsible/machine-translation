@@ -97,14 +97,16 @@ class RNNCell(torch.nn.Module):
 
 class RNN(torch.nn.Module):
 
-    def __init__(self, input_size, hidden_size):
+    def __init__(self, input_size, hidden_size, stack=1):
         super().__init__()
-        self.rnn = RNNCell(input_size, hidden_size)
+        self.rnn = torch.nn.ModuleList([RNNCell(input_size, hidden_size) for _ in range(stack)])
 
     def forward(self, input):
-        h_seq = [self.rnn.h0]
-        for emb in input:
-            h_seq.append(self.rnn(emb, h_seq[-1]))
+        for i in range(len(self.rnn)):
+            h_seq = [self.rnn[i].h0]
+            for emb in input:
+                h_seq.append(self.rnn[i](emb, h_seq[-1]))
+            input = torch.stack(h_seq)
         return torch.stack(h_seq)
 
 def attention(h, h_seq):
@@ -118,7 +120,7 @@ class Encoder(torch.nn.Module):
     def __init__(self, vocab_size, hidden_size):
         super().__init__()
         self.emb = Embedding(vocab_size, hidden_size)
-        self.rnn = RNN(hidden_size, hidden_size)
+        self.rnn = RNN(hidden_size, hidden_size, 2)
 
     def forward(self, src_nums):
         emb = self.emb(src_nums)
@@ -136,7 +138,9 @@ class Decoder(torch.nn.Module):
 
     def start(self, h_seq):
         h = self.rnn.h0
-        return (h, h_seq) # (h, h_seq[-1])
+        # c = h_seq[-1]
+        # return (h, c)
+        return (h, h_seq)
 
     def input(self, state, tgt_num):
         h, h_seq = state
@@ -201,10 +205,8 @@ if __name__ == "__main__":
     parser.add_argument('--save', type=str, help='save model in file')
     args = parser.parse_args()
 
-    seq_len, data_limit = 7, 12500 # len(train_data)
-
     if args.train:
-        train_data = []
+        train_data, seq_len = [], 20
         for line in open(args.train):
             lsplit = line.split('\t')
             src_line, tgt_line = lsplit[0].lower(), lsplit[1].lower()
@@ -212,11 +214,12 @@ if __name__ == "__main__":
             tgt_words = tgt_line.split() + ['<EOS>']
             if not seq_len or len(src_words) < seq_len:
                 train_data.append((src_words, tgt_words))
+        data_limit = len(train_data)
         split = math.ceil(0.8 * data_limit)
         val_data = train_data[split:data_limit]
         train_data = train_data[:split]
 
-        vocab_size, hidden_size, epoch_count, lr = 15000, 256, 1, 1e-4
+        vocab_size, hidden_size, epoch_count, lr = 15000, 512, 30, 1e-4
 
         src_count, tgt_count = Counter(), Counter()
         src_vocab, tgt_vocab = Vocab(), Vocab()
@@ -303,8 +306,7 @@ if __name__ == "__main__":
             test_data = []
             for line in open(args.infile):
                 words = line.lower().split() + ['<SEP>']
-                if not seq_len or len(words) < seq_len:
-                    test_data.append(words)
+                test_data.append(words)
             for words in test_data:
                 translation = model.translate(words)
                 print(' '.join(translation), file=outfile)

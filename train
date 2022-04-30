@@ -1,0 +1,2 @@
+#!/bin/bash
+python translate.py --train data/train.en-de data/test.en-de -o output --save model

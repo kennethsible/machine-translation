@@ -1,0 +1,13 @@
+ Corpus Name: WMT-News
+     Package: WMT-News.de-en in Moses format
+     Website: http://opus.nlpl.eu/WMT-News-v2019.php
+     Release: v2019
+Release date: Fri Jun 28 22:03:47 EEST 2019
+
+This corpus is part of OPUS - the open collection of parallel corpora
+OPUS Website: http://opus.nlpl.eu
+
+Please cite the following article if you use any part of the corpus in your own work: J. Tiedemann, 2012, Parallel Data, Tools and Interfaces in OPUS. In Proceedings of the 8th International Conference on Language Resources and Evaluation (LREC 2012)
+
+A parallel corpus of News Test Sets provided by WMT for training SMT: http://www.statmt.org/wmt19/
+

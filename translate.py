@@ -1,8 +1,9 @@
-import torch, random, math, copy, tqdm
-from torchtext.data.metrics import bleu_score
+import torch, random, math, copy, tqdm, re
 from collections.abc import MutableSet
-from collections import Counter
+from sacremoses import MosesDetokenizer
+from sacrebleu.metrics import BLEU
 
+bleu, md = BLEU(), MosesDetokenizer(lang='en')
 device = torch.device('cuda')
 
 class Vocab(MutableSet):
@@ -74,7 +75,10 @@ class LogSoftmax(torch.nn.Module):
         torch.nn.init.normal_(self.W, std=0.01)
 
     def forward(self, input):
-        z = self.W @ input
+        # https://www.aclweb.org/anthology/N18-1031/
+        W = torch.nn.functional.normalize(self.W, dim=-1)
+        input = 10 * torch.nn.functional.normalize(input, dim=-1)
+        z = W @ input
         return torch.log_softmax(z, dim=-1)
 
 class RNNCell(torch.nn.Module):
@@ -205,33 +209,46 @@ if __name__ == "__main__":
     parser.add_argument('--save', type=str, help='save model in file')
     args = parser.parse_args()
 
+    seq_len, data_limit = 20, 10000 # len(train_data)
+
     if args.train:
-        train_data, seq_len = [], 20
+        train_data = []
         for line in open(args.train):
-            lsplit = line.split('\t')
-            src_line, tgt_line = lsplit[0].lower(), lsplit[1].lower()
+            src_line, tgt_line = line.split('\t')
             src_words = src_line.split() + ['<SEP>']
             tgt_words = tgt_line.split() + ['<EOS>']
             if not seq_len or len(src_words) < seq_len:
                 train_data.append((src_words, tgt_words))
-        data_limit = len(train_data)
         split = math.ceil(0.8 * data_limit)
-        val_data = train_data[split:data_limit]
+        valid_data = train_data[split:data_limit]
         train_data = train_data[:split]
 
-        vocab_size, hidden_size, epoch_count, lr = 15000, 512, 30, 1e-4
+        vocab_size, hidden_size, epoch_count, lr = 10000, 256, 5, 1e-4
 
-        src_count, tgt_count = Counter(), Counter()
+        # from collections import Counter
+        # src_count, tgt_count = Counter(), Counter()
+        # src_vocab, tgt_vocab = Vocab(), Vocab()
+        # # for src_words, tgt_words in train_data:
+        # #     src_vocab |= src_words
+        # #     tgt_vocab |= tgt_words
+        # for src_words, tgt_words in train_data:
+        #     for word in src_words:
+        #         src_count[word] += 1
+        #     for word in tgt_words:
+        #         tgt_count[word] += 1
+        # for word, _ in src_count.most_common(vocab_size):
+        #     src_vocab.add(word)
+        # for word, _ in tgt_count.most_common(vocab_size):
+        #     tgt_vocab.add(word)
+
+        # TODO argparse to input vocab
         src_vocab, tgt_vocab = Vocab(), Vocab()
-        for src_words, tgt_words in train_data:
-            for word in src_words:
-                src_count[word] += 1
-            for word in tgt_words:
-                tgt_count[word] += 1
-        for word, _ in src_count.most_common(vocab_size):
-            src_vocab.add(word)
-        for word, _ in tgt_count.most_common(vocab_size):
-            tgt_vocab.add(word)
+        with open('data/vocab.de') as vocab_file:
+            for line in vocab_file.readlines()[:vocab_size]:
+                src_vocab.add(line.split()[0])
+        with open('data/vocab.en') as vocab_file:
+            for line in vocab_file.readlines()[:vocab_size]:
+                tgt_vocab.add(line.split()[0])
 
         model = Model(src_vocab, tgt_vocab, hidden_size).to(device)
 
@@ -263,15 +280,17 @@ if __name__ == "__main__":
             
             candidate, reference = [], []
             val_loss, val_tgt_words = 0., 0.
-            for line_num, (src_words, tgt_words) in enumerate(val_data):
+            for line_num, (src_words, tgt_words) in enumerate(valid_data):
                 val_loss += model(src_words, tgt_words).item()
                 val_tgt_words += len(tgt_words)
                 translation = model.translate(src_words)
-                candidate.append(translation)
-                reference.append([tgt_words[:-1]])
-            score = bleu_score(candidate, reference)
+                candidate.append(re.sub('(@@ )|(@@ ?$)', '', md.detokenize(translation)))
+                if line_num < 10:
+                    print(candidate[-1])
+                reference.append(re.sub('(@@ )|(@@ ?$)', '', md.detokenize(tgt_words[:-1])))
+            score = bleu.corpus_score(candidate, [reference])
 
-            print(f'[{epoch + 1}] train_loss={train_loss} train_ppl={math.exp(train_loss/train_tgt_words)} val_loss={val_loss} val_ppl={math.exp(val_loss/val_tgt_words)} val_score={score}', flush=True)
+            print(f'[{epoch + 1}] train_loss={train_loss} train_ppl={math.exp(train_loss/train_tgt_words)} val_loss={val_loss} val_ppl={math.exp(val_loss/val_tgt_words)}\n{score}', flush=True)
 
             if best_val_loss is None or val_loss < best_val_loss:
                 print('saving best model...')
@@ -283,30 +302,31 @@ if __name__ == "__main__":
 
         model = best_model
 
-        with open(args.outfile, 'w') as outfile:
-            test_data = []
-            for line in open(args.infile):
-                lsplit = line.split('\t')
-                src_line, tgt_line = lsplit[0].lower(), lsplit[1].lower()
-                src_words = src_line.split() + ['<SEP>']
-                tgt_words = tgt_line.split()
-                if not seq_len or len(src_words) < seq_len:
-                    test_data.append((src_words, tgt_words))
-            candidate, reference = [], []
-            for src_words, tgt_words in test_data:
-                translation = model.translate(src_words)
-                candidate.append(translation)
-                reference.append([tgt_words])
-                print(' '.join(tgt_words) + '\n' + ' '.join(translation) + '\n', file=outfile)
-            score = bleu_score(candidate, reference)
-            print(f'test_score={score}')
+        # with open(args.outfile, 'w') as outfile:
+        #     test_data = []
+        #     for line in open(args.infile):
+        #         lsplit = line.split('\t')
+        #         src_line, tgt_line = lsplit[0].lower(), lsplit[1].lower()
+        #         src_words = src_line.split() + ['<SEP>']
+        #         tgt_words = tgt_line.split()
+        #         if not seq_len or len(src_words) < seq_len:
+        #             test_data.append((src_words, tgt_words))
+        #     candidate, reference = [], []
+        #     for src_words, tgt_words in test_data:
+        #         translation = model.translate(src_words)
+        #         candidate.append(translation)
+        #         reference.append([tgt_words])
+        #         print(' '.join(tgt_words) + '\n' + ' '.join(translation) + '\n', file=outfile)
+        #     score = bleu.corpus_score(candidate, reference)
+        #     print(f'test_score={score}')
 
     elif args.infile:
         with open(args.outfile, 'w') as outfile:
             test_data = []
             for line in open(args.infile):
                 words = line.lower().split() + ['<SEP>']
-                test_data.append(words)
+                if not seq_len or len(words) < seq_len:
+                    test_data.append(words)
             for words in test_data:
                 translation = model.translate(words)
                 print(' '.join(translation), file=outfile)

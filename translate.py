@@ -83,7 +83,6 @@ class Model(torch.nn.Module):
             tgt_num = self.tgt_vocab.numberize(tgt_word).to(device)
             loss -= out[tgt_num]
             state = self.decoder.input(state, tgt_num)
-        loss /= len(tgt_words)
         return loss
 
 if __name__ == '__main__':

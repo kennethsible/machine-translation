@@ -102,14 +102,14 @@ class RNN(torch.nn.Module):
 
     def forward(self, input):
         for i in range(len(self.rnn)):
-            h_seq = [self.rnn[i].h0]
+            H = [self.rnn[i].h0]
             for emb in input:
-                h_seq.append(self.rnn[i](emb, h_seq[-1]))
-            input = torch.stack(h_seq)
-        return torch.stack(h_seq)
+                H.append(self.rnn[i](emb, H[-1]))
+            input = torch.stack(H)
+        return torch.stack(H)
 
-def attention(h, h_seq):
-    scores  = h @ h_seq.transpose(-2, -1)
+def attention(query, keys, values):
+    scores  = query @ keys.transpose(-2, -1)
     weights = torch.softmax(scores, dim=-1)
-    context = weights @ h_seq
+    context = weights @ values
     return context

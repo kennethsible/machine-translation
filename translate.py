@@ -18,8 +18,8 @@ class Encoder(torch.nn.Module):
 
     def forward(self, src_nums):
         emb = self.emb(src_nums)
-        h_seq = self.rnn(emb)
-        return h_seq
+        H = self.rnn(emb)
+        return H
 
 class Decoder(torch.nn.Module):
     
@@ -30,21 +30,21 @@ class Decoder(torch.nn.Module):
         self.tnh = nl.Tanh(2*hidden_size, hidden_size)
         self.out = nl.LogSoftmax(hidden_size, vocab_size)
 
-    def start(self, h_seq):
+    def start(self, H):
         h = self.rnn.h0
-        # c = h_seq[-1]
+        # c = H[-1]
         # return (h, c)
-        return (h, h_seq)
+        return (h, H)
 
     def input(self, state, tgt_num):
-        h, h_seq = state
+        h, H = state
         emb = self.emb(tgt_num).squeeze(0)
         h = self.rnn(emb, h)
-        return (h, h_seq)
+        return (h, H)
 
     def output(self, state):
-        h, h_seq = state
-        c = nl.attention(h, h_seq)
+        h, H = state
+        c = nl.attention(h, H, H)
         h = torch.cat((c, h), dim=-1)
         z = self.tnh(h)
         y = self.out(z)

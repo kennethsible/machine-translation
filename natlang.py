@@ -47,7 +47,32 @@ class Embedding(torch.nn.Module):
     def forward(self, input):
         emb = self.W[input]
         # https://www.aclweb.org/anthology/N18-1031/
-        return torch.nn.functional.normalize(emb, dim=1)
+        return torch.nn.functional.normalize(emb, dim=-1)
+
+class Linear(torch.nn.Module):
+
+    def __init__(self, input_size, output_size):
+        super().__init__()
+        self.W = torch.nn.Parameter(torch.empty(output_size, input_size))
+        self.b = torch.nn.Parameter(torch.empty(output_size))
+        torch.nn.init.normal_(self.W, std=0.01)
+        torch.nn.init.normal_(self.b, std=0.01)
+
+    def forward(self, input):
+        return self.W @ input + self.b
+
+class LayerNorm(torch.nn.Module):
+
+    def __init__(self, input_size, output_size):
+        super().__init__()
+        self.W = torch.nn.Parameter(torch.empty(output_size, input_size))
+        self.b = torch.nn.Parameter(torch.empty(output_size))
+        torch.nn.init.normal_(self.W, std=0.01)
+        torch.nn.init.normal_(self.b, std=0.01)
+
+    def forward(self, input):
+        input = (input - torch.mean(input)) / torch.std(input)
+        return self.W @ input + self.b
 
 class Tanh(torch.nn.Module):
 
@@ -92,24 +117,42 @@ class RNNCell(torch.nn.Module):
         torch.nn.init.normal_(self.b, std=0.01)
 
     def forward(self, input, hidden):
-        return torch.tanh(self.W_hi @ input + self.W_hh @ hidden + self.b)
+        z = self.W_hi @ input + self.W_hh @ hidden + self.b
+        return torch.tanh(z)
 
 class RNN(torch.nn.Module):
 
-    def __init__(self, input_size, hidden_size, stack=1):
+    def __init__(self, input_size, hidden_size, num_layers=1):
         super().__init__()
-        self.rnn = torch.nn.ModuleList([RNNCell(input_size, hidden_size) for _ in range(stack)])
+        self.layers = torch.nn.ModuleList([RNNCell(input_size, hidden_size) for _ in range(num_layers)])
 
-    def forward(self, input):
-        for i in range(len(self.rnn)):
-            H = [self.rnn[i].h0]
-            for emb in input:
-                H.append(self.rnn[i](emb, H[-1]))
-            input = torch.stack(H)
-        return torch.stack(H)
+    def forward(self, inputs):
+        for rnn in self.layers:
+            H = [rnn.h0]
+            for input in inputs:
+                H.append(rnn(input, H[-1]))
+            inputs = torch.stack(H)
+        return inputs
 
 def attention(query, keys, values):
     scores  = query @ keys.transpose(-2, -1)
     weights = torch.softmax(scores, dim=-1)
     context = weights @ values
     return context
+
+class SelfAttention(torch.nn.Module):
+
+    def __init__(self, input_size, output_size):
+        super().__init__()
+        self.W_Q = torch.nn.Parameter(torch.empty(output_size, input_size))
+        self.W_K = torch.nn.Parameter(torch.empty(output_size, input_size))
+        self.W_V = torch.nn.Parameter(torch.empty(output_size, input_size))
+        torch.nn.init.normal_(self.W_Q, std=0.01)
+        torch.nn.init.normal_(self.W_K, std=0.01)
+        torch.nn.init.normal_(self.W_V, std=0.01)
+
+    def forward(self, input):
+        q = self.W_Q @ input
+        k = self.W_K @ input
+        v = self.W_V @ input
+        return attention(q, k, v)

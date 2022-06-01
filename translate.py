@@ -10,19 +10,18 @@ def detokenize(words):
     return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(words))
 
 class Encoder(torch.nn.Module):
-    
+
     def __init__(self, vocab_size, hidden_size):
         super().__init__()
         self.emb = nl.Embedding(vocab_size, hidden_size)
         self.rnn = nl.RNN(hidden_size, hidden_size, 2)
 
-    def forward(self, src_nums):
-        emb = self.emb(src_nums)
-        H = self.rnn(emb)
-        return H
+    def forward(self, nums):
+        embs = self.emb(nums)
+        return self.rnn(embs)
 
 class Decoder(torch.nn.Module):
-    
+
     def __init__(self, hidden_size, vocab_size):
         super().__init__()
         self.emb = nl.Embedding(vocab_size, hidden_size)
@@ -32,13 +31,11 @@ class Decoder(torch.nn.Module):
 
     def start(self, H):
         h = self.rnn.h0
-        # c = H[-1]
-        # return (h, c)
         return (h, H)
 
-    def input(self, state, tgt_num):
+    def input(self, state, num):
         h, H = state
-        emb = self.emb(tgt_num).squeeze(0)
+        emb = self.emb(num).squeeze(0)
         h = self.rnn(emb, h)
         return (h, H)
 

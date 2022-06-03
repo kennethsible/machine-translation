@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
 data/train.*
-data/vocab.*
 data/test.*
+data/vocab.*
+data/out

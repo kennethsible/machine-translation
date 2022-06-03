@@ -1,11 +1,9 @@
 import torch
-from collections.abc import MutableSet
 
-class Vocab(MutableSet):
+class Vocab:
 
     def __init__(self):
-        super().__init__()
-        self.num_to_word = ['<SEP>', '<EOS>', '<UNK>']
+        self.num_to_word = ['<PAD>', '<EOS>', '<UNK>']
         self.word_to_num = {word: i for i, word in enumerate(self.num_to_word)}
 
     def add(self, word):
@@ -14,7 +12,7 @@ class Vocab(MutableSet):
             self.num_to_word.append(word)
             self.word_to_num[word] = num
 
-    def discard(self, word):
+    def remove(self, word):
         if word in self.word_to_num:
             self.num_to_word.remove(word)
             self.word_to_num.pop(word)
@@ -28,14 +26,14 @@ class Vocab(MutableSet):
         words = [self.num_to_word[num] for num in nums]
         return words if len(words) > 1 else words[0]
 
-    def __contains__(self, word):
-        return word in self.word_to_num
-
-    def __iter__(self):
-        return iter(self.num_to_word)
-
     def __len__(self):
         return len(self.num_to_word)
+
+def bmv(w, x):
+    x = x.unsqueeze(-1)
+    y = w @ x
+    y = y.squeeze(-1)
+    return y
 
 class Embedding(torch.nn.Module):
 
@@ -45,7 +43,7 @@ class Embedding(torch.nn.Module):
         torch.nn.init.normal_(self.W, std=0.01)
 
     def forward(self, input):
-        emb = self.W[input]
+        emb = self.W[input.transpose(0, 1)]
         # https://www.aclweb.org/anthology/N18-1031/
         return torch.nn.functional.normalize(emb, dim=-1)
 
@@ -59,7 +57,7 @@ class Linear(torch.nn.Module):
         torch.nn.init.normal_(self.b, std=0.01)
 
     def forward(self, input):
-        return self.W @ input + self.b
+        return bmv(self.W, input) + self.b
 
 class LayerNorm(torch.nn.Module):
 
@@ -72,7 +70,7 @@ class LayerNorm(torch.nn.Module):
 
     def forward(self, input):
         input = (input - torch.mean(input)) / torch.std(input)
-        return self.W @ input + self.b
+        return bmv(self.W, input) + self.b
 
 class Tanh(torch.nn.Module):
 
@@ -84,7 +82,7 @@ class Tanh(torch.nn.Module):
         torch.nn.init.normal_(self.b, std=0.01)
 
     def forward(self, input):
-        z = self.W @ input + self.b
+        z = bmv(self.W, input) + self.b
         return torch.tanh(z)
 
 class LogSoftmax(torch.nn.Module):
@@ -98,7 +96,7 @@ class LogSoftmax(torch.nn.Module):
         # https://www.aclweb.org/anthology/N18-1031/
         W = torch.nn.functional.normalize(self.W, dim=-1)
         input = 10 * torch.nn.functional.normalize(input, dim=-1)
-        z = W @ input
+        z = bmv(W, input)
         return torch.log_softmax(z, dim=-1)
 
 class RNNCell(torch.nn.Module):
@@ -117,7 +115,7 @@ class RNNCell(torch.nn.Module):
         torch.nn.init.normal_(self.b, std=0.01)
 
     def forward(self, input, hidden):
-        z = self.W_hi @ input + self.W_hh @ hidden + self.b
+        z = bmv(self.W_hi, input) + bmv(self.W_hh, hidden) + self.b
         return torch.tanh(z)
 
 class RNN(torch.nn.Module):
@@ -127,18 +125,78 @@ class RNN(torch.nn.Module):
         self.layers = torch.nn.ModuleList([RNNCell(input_size, hidden_size) for _ in range(num_layers)])
 
     def forward(self, inputs):
+        batch_size = inputs.size()[1]
         for rnn in self.layers:
-            H = [rnn.h0]
+            h, H = rnn.h0.repeat(batch_size, 1), []
             for input in inputs:
-                H.append(rnn(input, H[-1]))
+                h = rnn(input, h)
+                H.append(h)
             inputs = torch.stack(H)
         return inputs
 
-def attention(query, keys, values):
-    scores  = query @ keys.transpose(-2, -1)
-    weights = torch.softmax(scores, dim=-1)
-    context = weights @ values
-    return context
+class LSTMCell(torch.nn.Module):
+    
+    def __init__(self, input_size, hidden_size):
+        super().__init__()
+        self.h0 = torch.nn.Parameter(torch.empty(hidden_size))
+        self.m0 = torch.nn.Parameter(torch.empty(hidden_size))
+        self.W_xf = torch.nn.Parameter(torch.empty(hidden_size, input_size))
+        self.W_hf = torch.nn.Parameter(torch.empty(hidden_size, hidden_size))
+        self.W_xi = torch.nn.Parameter(torch.empty(hidden_size, input_size))
+        self.W_hi = torch.nn.Parameter(torch.empty(hidden_size, hidden_size))
+        self.W_xo = torch.nn.Parameter(torch.empty(hidden_size, input_size))
+        self.W_ho = torch.nn.Parameter(torch.empty(hidden_size, hidden_size))
+        self.W_xm = torch.nn.Parameter(torch.empty(hidden_size, input_size))
+        self.W_hm = torch.nn.Parameter(torch.empty(hidden_size, hidden_size))
+        self.b_f = torch.nn.Parameter(torch.empty(hidden_size))
+        self.b_i = torch.nn.Parameter(torch.empty(hidden_size))
+        self.b_o = torch.nn.Parameter(torch.empty(hidden_size))
+        self.b_m = torch.nn.Parameter(torch.empty(hidden_size))
+        torch.nn.init.normal_(self.h0, std=0.01)
+        torch.nn.init.normal_(self.m0, std=0.01)
+        torch.nn.init.normal_(self.W_xf, std=0.01)
+        torch.nn.init.normal_(self.W_hf, std=0.01)
+        torch.nn.init.normal_(self.W_xi, std=0.01)
+        torch.nn.init.normal_(self.W_hi, std=0.01)
+        torch.nn.init.normal_(self.W_xo, std=0.01)
+        torch.nn.init.normal_(self.W_ho, std=0.01)
+        torch.nn.init.normal_(self.W_xm, std=0.01)
+        torch.nn.init.normal_(self.W_hm, std=0.01)
+        torch.nn.init.normal_(self.b_f, std=0.01)
+        torch.nn.init.normal_(self.b_i, std=0.01)
+        torch.nn.init.normal_(self.b_o, std=0.01)
+        torch.nn.init.normal_(self.b_m, std=0.01)
+
+    def forward(self, input, hidden, memory):
+        f = torch.sigmoid(bmv(self.W_xf, input) + bmv(self.W_hf, hidden) + self.b_f)
+        i = torch.sigmoid(bmv(self.W_xi, input) + bmv(self.W_hi, hidden) + self.b_i)
+        o = torch.sigmoid(bmv(self.W_xo, input) + bmv(self.W_ho, hidden) + self.b_o)
+        m = f * memory + i * torch.tanh(bmv(self.W_xm, input) + bmv(self.W_hm, hidden) + self.b_m)
+        return o * torch.tanh(m), m
+
+class LSTM(torch.nn.Module):
+
+    def __init__(self, input_size, hidden_size, num_layers=1):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([LSTMCell(input_size, hidden_size) for _ in range(num_layers)])
+
+    def forward(self, inputs):
+        batch_size = inputs.size()[1]
+        for lstm in self.layers:
+            h, m, H = lstm.h0.repeat(batch_size, 1), lstm.m0.repeat(batch_size, 1), []
+            for input in inputs:
+                h, m = lstm(input, h, m)
+                H.append(h)
+            inputs = torch.stack(H)
+        return inputs
+
+def attention(query, keys, values, mask):
+    # (torch.zeros((10, 256)).unsqueeze(1) @ torch.zeros((10, 256, 18))).squeeze(1).size()
+    scores  = query.unsqueeze(1) @ keys.transpose(-2, -1)
+    # print(scores.squeeze(1) * mask) TODO
+    weights = torch.softmax(scores.squeeze(1), dim=-1)
+    context = weights.unsqueeze(1) @ values
+    return context.squeeze(1)
 
 class SelfAttention(torch.nn.Module):
 

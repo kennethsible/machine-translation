@@ -6,6 +6,8 @@ import natlang as nl
 bleu, md = BLEU(), MosesDetokenizer(lang='en')
 device = torch.device('cuda')
 
+# torch.manual_seed(0)
+
 def detokenize(words):
     return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(words))
 
@@ -30,18 +32,20 @@ class Decoder(torch.nn.Module):
         self.out = nl.LogSoftmax(hidden_size, vocab_size)
 
     def start(self, H):
-        h = self.rnn.h0
+        batch_size = H[0].size()[0]
+        h = self.rnn.h0.repeat(batch_size, 1)
         return (h, H)
 
     def input(self, state, num):
         h, H = state
-        emb = self.emb(num).squeeze(0)
-        h = self.rnn(emb, h)
+        emb = self.emb(num.unsqueeze(0))
+        h = self.rnn(emb.squeeze(1), h)
         return (h, H)
 
-    def output(self, state):
+    def output(self, state, mask=None):
         h, H = state
-        c = nl.attention(h, H, H)
+        HT = H.transpose(0, 1)
+        c = nl.attention(h, HT, HT, mask)
         h = torch.cat((c, h), dim=-1)
         z = self.tnh(h)
         y = self.out(z)
@@ -58,27 +62,36 @@ class Model(torch.nn.Module):
 
     def translate(self, src_words):
         src_nums = self.src_vocab.numberize(*src_words).to(device)
-        src_encs = self.encoder(src_nums)
-        state = self.decoder.start(src_encs)
-        tgt_words = []
+        src_encs = self.encoder(src_nums.unsqueeze(0))
+
+        mask = (src_nums > 0).float()
+        mask[mask==0] = -torch.inf
+
+        output, state = [], self.decoder.start(src_encs)
         for _ in range(100):
-            out = self.decoder.output(state)
-            tgt_num = torch.argmax(out).view((1,))
+            out = self.decoder.output(state, mask)
+            tgt_num = torch.argmax(out.squeeze(0)).view((1,))
             tgt_word = self.tgt_vocab.denumberize(tgt_num.item())
             if tgt_word == '<EOS>': break
-            tgt_words.append(tgt_word)
-            state = self.decoder.input(state, tgt_num)
-        return tgt_words
+            output.append(tgt_word)
+            state = self.decoder.input(state, tgt_num.unsqueeze(0))
+        return output
 
-    def forward(self, src_words, tgt_words):
-        src_nums = self.src_vocab.numberize(*src_words).to(device)
+    def forward(self, src_sents, tgt_sents):
+        src_nums = torch.stack([self.src_vocab.numberize(*src_words)
+            for src_words in src_sents]).to(device)
         src_encs = self.encoder(src_nums)
-        state = self.decoder.start(src_encs)
-        loss = 0
-        for tgt_word in tgt_words:
-            out = self.decoder.output(state)
-            tgt_num = self.tgt_vocab.numberize(tgt_word).to(device)
-            loss -= out[tgt_num]
+
+        mask = (src_nums > 0).float()
+        mask[mask==0] = -torch.inf
+
+        seq_len = len(tgt_sents[0])
+        loss, state = 0, self.decoder.start(src_encs)
+        for i in range(seq_len):
+            tgt_word = [tgt_words[i] for tgt_words in tgt_sents]
+            out = self.decoder.output(state, mask)
+            tgt_num = self.tgt_vocab.numberize(*tgt_word).to(device)
+            loss -= sum(out[i, num] for i, num in enumerate(tgt_num) if num != 0)
             state = self.decoder.input(state, tgt_num)
         return loss
 
@@ -92,30 +105,71 @@ if __name__ == '__main__':
     parser.add_argument('--save', type=str, help='save model')
     args = parser.parse_args()
 
-    seq_len, vocab_size, hidden_size, epoch_count, lr = 20, 10000, 256, 5, 1e-4
+    MAX_LEN = 20
+    # VOCAB_SIZE = 10000
+    BATCH_SIZE = 50
+    EMBED_SIZE = 256
+    LEARN_RATE = 1e-4
+    EPOCH_COUNT = 15
 
     if args.train:
-        train_data = []
+        training = []
         for line in open(args.train):
             src_line, tgt_line = line.split('\t')
-            src_words = src_line.split() + ['<SEP>']
+            src_words = src_line.split() + ['<EOS>']
             tgt_words = tgt_line.split() + ['<EOS>']
-            if not seq_len or len(src_words) < seq_len:
-                train_data.append((src_words, tgt_words))
-        N = 10000 # TODO remove with minibatching
-        i = math.ceil(0.8 * N)
-        train_data, dev_data = train_data[:i], train_data[i:N]
+            if not MAX_LEN or len(src_words) < MAX_LEN:
+                training.append((src_words, tgt_words))
+
+        MAX_TRAIN = 100000
+        assert MAX_TRAIN < len(training)
+        VAL_START = math.ceil(0.95 * MAX_TRAIN)
+        training, validation = training[:VAL_START], training[VAL_START:MAX_TRAIN]
+
+        batches = []
+        training.sort(key=lambda x: len(x[0]))
+        for i in range(BATCH_SIZE, len(training) + 1, BATCH_SIZE):
+            batch = training[(i - BATCH_SIZE):i]
+            src_max_len = max(len(src_words) for src_words, _ in batch)
+            tgt_max_len = max(len(tgt_words) for _, tgt_words in batch)
+            for src_words, tgt_words in batch:
+                residual = src_max_len - len(src_words)
+                if residual > 0:
+                    src_words.extend(residual * ['<PAD>'])
+                residual = tgt_max_len - len(tgt_words)
+                if residual > 0:
+                    tgt_words.extend(residual * ['<PAD>'])
+            batches.append(batch)
+        assert len(batches) == VAL_START//BATCH_SIZE
+        training = batches
+
+        batches = []
+        validation.sort(key=lambda x: len(x[0]))
+        for i in range(BATCH_SIZE, len(validation) + 1, BATCH_SIZE):
+            batch = validation[(i - BATCH_SIZE):i]
+            src_max_len = max(len(src_words) for src_words, _ in batch)
+            tgt_max_len = max(len(tgt_words) for _, tgt_words in batch)
+            for src_words, tgt_words in batch:
+                residual = src_max_len - len(src_words)
+                if residual > 0:
+                    src_words.extend(residual * ['<PAD>'])
+                residual = tgt_max_len - len(tgt_words)
+                if residual > 0:
+                    tgt_words.extend(residual * ['<PAD>'])
+            batches.append(batch)
+        assert len(batches) == (MAX_TRAIN - VAL_START)//BATCH_SIZE
+        validation = batches
 
         # TODO use argparse to input vocab
         src_vocab, tgt_vocab = nl.Vocab(), nl.Vocab()
         with open('data/vocab.de') as vocab_file:
-            for line in vocab_file.readlines()[:vocab_size]:
+            for line in vocab_file.readlines(): # [:VOCAB_SIZE]
                 src_vocab.add(line.split()[0])
         with open('data/vocab.en') as vocab_file:
-            for line in vocab_file.readlines()[:vocab_size]:
+            for line in vocab_file.readlines(): # [:VOCAB_SIZE]
                 tgt_vocab.add(line.split()[0])
 
-        model = Model(src_vocab, tgt_vocab, hidden_size).to(device)
+        model = Model(src_vocab, tgt_vocab, EMBED_SIZE).to(device)
 
     elif args.load:
         if args.save:
@@ -128,34 +182,42 @@ if __name__ == '__main__':
         raise ValueError('-o is required')
 
     if args.train:
-        opt = torch.optim.Adam(model.parameters(), lr=lr)
+        opt = torch.optim.Adam(model.parameters(), lr=LEARN_RATE)
 
         best_loss = None
-        for epoch in range(epoch_count):
-            random.shuffle(train_data)
+        for epoch in range(EPOCH_COUNT):
+            random.shuffle(training)
 
             train_loss, total_words = 0., 0.
-            for src_words, tgt_words in tqdm.tqdm(train_data):
-                loss = model(src_words, tgt_words)
+            for batch in tqdm.tqdm(training):
+                loss = model(*zip(*batch))
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
                 train_loss += loss.item()
-                total_words += len(tgt_words)
-            train_ppl = math.exp(train_loss/total_words)
-            
-            candidate, reference = [], []
-            dev_loss, total_words = 0., 0.
-            for line_num, (src_words, tgt_words) in enumerate(dev_data):
-                dev_loss += model(src_words, tgt_words).item()
-                total_words += len(tgt_words)
-                candidate.append(detokenize(model.translate(src_words)))
-                reference.append(detokenize(tgt_words[:-1]))
-                # if line_num < 10: print(candidate[-1])
-            dev_ppl = math.exp(dev_loss/total_words)
-            score = bleu.corpus_score(candidate, [reference])
+                # total_words += len(tgt_words)
+            # train_ppl = math.exp(train_loss/total_words)
 
-            print(f'[{epoch + 1}] train_loss={train_loss} train_ppl={train_ppl} dev_loss={dev_loss} dev_ppl={dev_ppl}\n{score}')
+            candidate, reference = [], []
+
+            dev_loss, total_words = 0., 0.
+            for batch in validation:
+                dev_loss += model(*zip(*batch)).item()
+                for src_words, tgt_words in batch:
+                    candidate.append(detokenize(model.translate(src_words)))
+                    reference.append(detokenize(tgt_words[:tgt_words.index('<EOS>')]))
+                    total_words += len(tgt_words)
+                # total_words += len(tgt_words)
+            # dev_ppl = math.exp(dev_loss/total_words)
+
+            for x, y in zip(candidate[:5], reference[:5]):
+                print(f'> {x}\n< {y}')
+            score = bleu.corpus_score(candidate, [reference])
+            # print(f'\n{score}\n')
+            print()
+
+            # print(f'[{epoch + 1}] train_loss={train_loss} train_ppl={train_ppl} dev_loss={dev_loss} dev_ppl={dev_ppl}\n{score}')
+            print(f'[{epoch + 1}] train_loss={train_loss} dev_loss={dev_loss}\n{score}')
             if best_loss is None or dev_loss < best_loss:
                 print('saving best model...')
                 best_model = copy.deepcopy(model)
@@ -170,8 +232,8 @@ if __name__ == '__main__':
         with open(args.outfile, 'w') as outfile:
             test_data = []
             for line in open(args.infile):
-                words = line.lower().split() + ['<SEP>']
-                if not seq_len or len(words) < seq_len:
+                words = line.lower().split() + ['<EOS>']
+                if not MAX_LEN or len(words) < MAX_LEN:
                     test_data.append(words)
-            for words in test_data:
+            for words in tqdm.tqdm(test_data):
                 print(detokenize(model.translate(words)), file=outfile)

@@ -191,9 +191,8 @@ class LSTM(torch.nn.Module):
         return inputs
 
 def attention(query, keys, values, mask):
-    # (torch.zeros((10, 256)).unsqueeze(1) @ torch.zeros((10, 256, 18))).squeeze(1).size()
     scores  = query.unsqueeze(1) @ keys.transpose(-2, -1)
-    # print(scores.squeeze(1) * mask) TODO
+    scores[mask.unsqueeze(1)] = -torch.inf
     weights = torch.softmax(scores.squeeze(1), dim=-1)
     context = weights.unsqueeze(1) @ values
     return context.squeeze(1)

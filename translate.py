@@ -6,7 +6,7 @@ import natlang as nl
 bleu, md = BLEU(), MosesDetokenizer(lang='en')
 device = torch.device('cuda')
 
-# torch.manual_seed(0)
+torch.manual_seed(0)
 
 def detokenize(words):
     return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(words))
@@ -63,9 +63,7 @@ class Model(torch.nn.Module):
     def translate(self, src_words):
         src_nums = self.src_vocab.numberize(*src_words).to(device)
         src_encs = self.encoder(src_nums.unsqueeze(0))
-
-        mask = (src_nums > 0).float()
-        mask[mask==0] = -torch.inf
+        mask = (src_nums == 0)
 
         output, state = [], self.decoder.start(src_encs)
         for _ in range(100):
@@ -81,9 +79,7 @@ class Model(torch.nn.Module):
         src_nums = torch.stack([self.src_vocab.numberize(*src_words)
             for src_words in src_sents]).to(device)
         src_encs = self.encoder(src_nums)
-
-        mask = (src_nums > 0).float()
-        mask[mask==0] = -torch.inf
+        mask = (src_nums == 0)
 
         seq_len = len(tgt_sents[0])
         loss, state = 0, self.decoder.start(src_encs)

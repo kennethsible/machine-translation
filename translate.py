@@ -6,7 +6,7 @@ import natlang as nl
 bleu, md = BLEU(), MosesDetokenizer(lang='en')
 device = torch.device('cuda')
 
-torch.manual_seed(0)
+# torch.manual_seed(0)
 
 def detokenize(words):
     return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(words))
@@ -16,7 +16,7 @@ class Encoder(torch.nn.Module):
     def __init__(self, vocab_size, hidden_size):
         super().__init__()
         self.emb = nl.Embedding(vocab_size, hidden_size)
-        self.rnn = nl.LSTM(hidden_size, hidden_size, 2)
+        self.rnn = nl.RNN(hidden_size, hidden_size, 2)
 
     def forward(self, nums):
         embs = self.emb(nums)
@@ -27,24 +27,23 @@ class Decoder(torch.nn.Module):
     def __init__(self, hidden_size, vocab_size):
         super().__init__()
         self.emb = nl.Embedding(vocab_size, hidden_size)
-        self.lstm = nl.LSTMCell(hidden_size, hidden_size)
+        self.rnn = nl.RNNCell(hidden_size, hidden_size)
         self.tnh = nl.Tanh(2*hidden_size, hidden_size)
         self.out = nl.LogSoftmax(hidden_size, vocab_size)
 
     def start(self, H):
         batch_size = H[0].size()[0]
-        h = self.lstm.h0.repeat(batch_size, 1)
-        m = self.lstm.m0.repeat(batch_size, 1)
-        return (h, m, H)
+        h = self.rnn.h0.repeat(batch_size, 1)
+        return (h, H)
 
     def input(self, state, num):
-        h, m, H = state
+        h, H = state
         emb = self.emb(num.unsqueeze(0))
-        h, m = self.lstm(emb.squeeze(1), h, m)
-        return (h, m, H)
+        h = self.rnn(emb.squeeze(1), h)
+        return (h, H)
 
     def output(self, state, mask=None):
-        h, _, H = state
+        h, H = state
         HT = H.transpose(0, 1)
         c = nl.attention(h, HT, HT, mask)
         h = torch.cat((c, h), dim=-1)
@@ -64,7 +63,7 @@ class Model(torch.nn.Module):
     def translate(self, src_words):
         src_nums = self.src_vocab.numberize(*src_words).to(device)
         src_encs = self.encoder(src_nums.unsqueeze(0))
-        mask = (src_nums == 0)
+        mask = (src_nums == 0).unsqueeze(0)
 
         output, state = [], self.decoder.start(src_encs)
         for _ in range(100):
@@ -73,7 +72,7 @@ class Model(torch.nn.Module):
             tgt_word = self.tgt_vocab.denumberize(tgt_num.item())
             if tgt_word == '<EOS>': break
             output.append(tgt_word)
-            state = self.decoder.input(state, tgt_num.unsqueeze(0))
+            state = self.decoder.input(state, tgt_num)
         return output
 
     def forward(self, src_sents, tgt_sents):
@@ -107,7 +106,7 @@ if __name__ == '__main__':
     BATCH_SIZE = 50
     EMBED_SIZE = 256
     LEARN_RATE = 1e-4
-    EPOCH_COUNT = 15
+    EPOCH_COUNT = 20
 
     if args.train:
         training = []

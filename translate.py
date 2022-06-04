@@ -16,7 +16,7 @@ class Encoder(torch.nn.Module):
     def __init__(self, vocab_size, hidden_size):
         super().__init__()
         self.emb = nl.Embedding(vocab_size, hidden_size)
-        self.rnn = nl.RNN(hidden_size, hidden_size, 2)
+        self.rnn = nl.LSTM(hidden_size, hidden_size, 2)
 
     def forward(self, nums):
         embs = self.emb(nums)
@@ -27,23 +27,24 @@ class Decoder(torch.nn.Module):
     def __init__(self, hidden_size, vocab_size):
         super().__init__()
         self.emb = nl.Embedding(vocab_size, hidden_size)
-        self.rnn = nl.RNNCell(hidden_size, hidden_size)
+        self.rnn = nl.LSTMCell(hidden_size, hidden_size)
         self.tnh = nl.Tanh(2*hidden_size, hidden_size)
         self.out = nl.LogSoftmax(hidden_size, vocab_size)
 
     def start(self, H):
         batch_size = H[0].size()[0]
         h = self.rnn.h0.repeat(batch_size, 1)
-        return (h, H)
+        m = self.rnn.m0.repeat(batch_size, 1)
+        return (m, h, H)
 
     def input(self, state, num):
-        h, H = state
+        m, h, H = state
         emb = self.emb(num.unsqueeze(0))
-        h = self.rnn(emb.squeeze(1), h)
-        return (h, H)
+        h, m = self.rnn(emb.squeeze(1), h, m)
+        return (m, h, H)
 
     def output(self, state, mask=None):
-        h, H = state
+        _, h, H = state
         HT = H.transpose(0, 1)
         c = nl.attention(h, HT, HT, mask)
         h = torch.cat((c, h), dim=-1)

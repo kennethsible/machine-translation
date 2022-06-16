@@ -1,9 +1,11 @@
-import torch, copy, math, tqdm, random, re, time
+import torch, random, copy, math, tqdm, time, re
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sacremoses import MosesTokenizer, MosesDetokenizer
 from subword_nmt.apply_bpe import BPE, read_vocabulary
 from sacrebleu.metrics import BLEU, CHRF
 from torch import nn
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 bleu, chrf = BLEU(), CHRF()
 mt, md = MosesTokenizer(lang='de'), MosesDetokenizer(lang='en')
@@ -82,8 +84,7 @@ class MultiHeadedAttention(nn.Module):
     def __init__(self, h, d_model, dropout=0.1):
         super().__init__()
         assert d_model % h == 0
-        # We assume d_v always equals d_k
-        self.d_k = d_model // h
+        self.d_k = d_model // h # d_v = d_k
         self.h = h
         self.linears = clone(nn.Linear(d_model, d_model), 4)
         self.attn = None
@@ -102,18 +103,14 @@ class MultiHeadedAttention(nn.Module):
 
     def forward(self, query, key, value, mask=None):
         if mask is not None:
-            # Same mask applied to all h heads.
             mask = mask.unsqueeze(1)
         nbatches = query.size(0)
 
         # 1) Do all the linear projections in batch from d_model => h x d_k
-        # print('>', query.size(), key.size(), value.size())
         query, key, value = [
             lin(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
             for lin, x in zip(self.linears, (query, key, value))
         ]
-        # print('>', query.size(), key.size(), value.size())
-        # print()
 
         # 2) Apply attention on all the projected vectors in batch.
         x, self.attn = self.attention(
@@ -215,10 +212,18 @@ class Model(nn.Module):
 
 def subsequent_mask(size):
     att_shape = (1, size, size)
-    subsequent_mask = torch.triu(torch.ones(att_shape), diagonal=1)
+    subsequent_mask = torch.triu(torch.ones(att_shape), diagonal=1).type(torch.uint8)
     return subsequent_mask == 0
 
-##########################################################################################
+class LossCompute:
+
+    def __init__(self, generator, criterion):
+        self.generator = generator
+        self.criterion = criterion
+
+    def __call__(self, x, y):
+        x = self.generator(x)
+        return self.criterion(x.contiguous().view(-1, x.size(-1)), y.contiguous().view(-1))
 
 class Vocab:
 
@@ -258,14 +263,12 @@ class Batch:
             self.tgt = tgt[:, :-1]
             self.tgt_y = tgt[:, 1:]
             self.tgt_mask = self.create_mask(self.tgt, pad)
-            self.ntokens = (self.tgt_y != pad).data.sum()
+            self.ntokens = (self.tgt_y != pad).detach().sum()
 
     @staticmethod
     def create_mask(tgt, pad):
         tgt_mask = (tgt != pad).unsqueeze(-2)
-        tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(
-            tgt_mask.data
-        )
+        tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(tgt_mask.detach())
         return tgt_mask
 
 def train_epoch(data, model, loss_compute, optimizer=None, mode='train'):
@@ -273,36 +276,19 @@ def train_epoch(data, model, loss_compute, optimizer=None, mode='train'):
     total_tokens = 0
     for batch in data:
         out = model(batch.src, batch.tgt, batch.src_mask, batch.tgt_mask)
-        loss, loss_node = loss_compute(out, batch.tgt_y, batch.ntokens)
+        loss = loss_compute(out, batch.tgt_y)
         if mode == 'train':
             optimizer.zero_grad()
-            loss_node.backward()
+            loss.backward()
             optimizer.step()
         total_loss += loss.item()
         total_tokens += batch.ntokens
         del loss
-        del loss_node
     return total_loss / total_tokens
 
-class LossCompute:
-
-    def __init__(self, generator, criterion):
-        self.generator = generator
-        self.criterion = criterion
-
-    def __call__(self, x, y, norm):
-        x = self.generator(x)
-        sloss = (
-            self.criterion(
-                x.contiguous().view(-1, x.size(-1)), y.contiguous().view(-1)
-            )
-            / norm
-        )
-        return sloss.data * norm, sloss
-
-def greedy_decode(model, src, src_mask, max_len, start_symbol):
+def greedy_decode(model, src, src_mask, max_len=64, start_word=0):
     memory = model.encode(src, src_mask)
-    tgt = torch.full((src.size(0), 1), start_symbol).type_as(src)
+    tgt = torch.full((src.size(0), 1), start_word).type_as(src)
     for _ in range(max_len - 1):
         out = model.decode(memory, src_mask, tgt, subsequent_mask(tgt.size(-1)).type_as(src))
         prob = model.generator(out[:, -1])
@@ -327,23 +313,21 @@ def batch_data(data, batch_size):
         batched.append(batch)
     return batched
 
-def train_model():
-    MAX_LEN, DATA_LIMIT, BATCH_SIZE, NUM_EPOCHS = 30, 1000000, 16, 10
-
+def train_model(max_len, data_limit, batch_size, num_epochs, lr):
     train_data = []
     for line in open('data/train.bpe.de-en'):
         src_line, tgt_line = line.split('\t')
         src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
         tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
-        if MAX_LEN is None or len(src_words) <= MAX_LEN:
+        if max_len is None or len(src_words) <= max_len:
             train_data.append((src_words, tgt_words))
 
-    assert DATA_LIMIT < len(train_data)
-    VALID_START = math.ceil(0.995 * DATA_LIMIT)
-    valid_data = batch_data(train_data[VALID_START:DATA_LIMIT], BATCH_SIZE)
-    assert len(valid_data) == (DATA_LIMIT - VALID_START)//BATCH_SIZE
-    train_data = batch_data(train_data[:VALID_START], BATCH_SIZE)
-    assert len(train_data) == VALID_START//BATCH_SIZE
+    assert data_limit < len(train_data)
+    valid_start = math.ceil(0.995 * data_limit)
+    valid_data = batch_data(train_data[valid_start:data_limit], batch_size)
+    assert len(valid_data) == (data_limit - valid_start)//batch_size
+    train_data = batch_data(train_data[:valid_start], batch_size)
+    assert len(train_data) == valid_start//batch_size
 
     src_vocab, tgt_vocab = Vocab(), Vocab()
     with open('data/vocab.de') as vocab_file:
@@ -354,15 +338,15 @@ def train_model():
             tgt_vocab.add(line.split()[0])
 
     pad_idx = tgt_vocab.numberize('<PAD>').item()
-    model = Model(len(src_vocab), len(tgt_vocab)).cuda()
+    model = Model(len(src_vocab), len(tgt_vocab)).to(device)
 
-    criterion = nn.CrossEntropyLoss().cuda()
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = ReduceLROnPlateau(optimizer)
 
-    best_score = 0.
-    for epoch in range(NUM_EPOCHS):
+    # best_score = 0.
+    for epoch in range(num_epochs):
         random.shuffle(train_data)
     
         start = time.time()
@@ -370,8 +354,8 @@ def train_model():
         data = []
         for batch in train_data:
             src, tgt = zip(*batch)
-            src = torch.stack([src_vocab.numberize(*words) for words in src]).cuda()
-            tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).cuda()
+            src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
+            tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
             data.append(Batch(src, tgt, pad_idx))
         train_loss = train_epoch(
             data,
@@ -385,8 +369,8 @@ def train_model():
         data = []
         for batch in valid_data:
             src, tgt = zip(*batch)
-            src = torch.stack([src_vocab.numberize(*words) for words in src]).cuda()
-            tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).cuda()
+            src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
+            tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
             data.append(Batch(src, tgt, pad_idx))
         valid_loss = train_epoch(
             data,
@@ -400,23 +384,65 @@ def train_model():
         lr = optimizer.param_groups[0]['lr']
         print(f'[{epoch + 1}] Train Loss: {train_loss} | Valid Loss: {valid_loss} | Learning Rate: {lr} | Elapsed Time: {elapsed}', flush=True)
 
-        candidate, reference = [], []
-        for batch in tqdm.tqdm(valid_data): # TODO score_test()
-            for src, tgt in batch:
-                src = src_vocab.numberize(*src).unsqueeze(0).cuda()
-                tgt = tgt_vocab.numberize(*tgt).unsqueeze(0).cuda()
-                batch = Batch(src, tgt, pad_idx)
-                model_out = greedy_decode(model, batch.src, batch.src_mask, 64, 0)[0]
-                reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[0] if x != pad_idx]))
-                candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
-        bleu_score = bleu.corpus_score(candidate, [reference])
-        chrf_score = chrf.corpus_score(candidate, [reference])
-        print(chrf_score, ';', bleu_score, flush=True)
-        if bleu_score.score > best_score:
-            print('saving best model...')
-            torch.save(model, 'model')
-            best_score = bleu_score.score
-        print()
+        # TODO score_test()
+        # candidate, reference = [], []
+        # for batch in tqdm.tqdm(valid_data):
+        #     for src, tgt in batch:
+        #         src = src_vocab.numberize(*src).unsqueeze(0).to(device)
+        #         tgt = tgt_vocab.numberize(*tgt).unsqueeze(0).to(device)
+        #         batch = Batch(src, tgt, pad_idx)
+        #         model_out = greedy_decode(model, batch.src, batch.src_mask)[0]
+        #         reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[0] if x != pad_idx]))
+        #         candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
+
+        # bleu_score = bleu.corpus_score(candidate, [reference])
+        # chrf_score = chrf.corpus_score(candidate, [reference])
+        # print(chrf_score, ';', bleu_score, flush=True)
+        # if bleu_score.score > best_score:
+        #     print('saving best model...')
+        #     torch.save(model, 'model')
+        #     best_score = bleu_score.score
+        # print()
+
+def score_test(max_len, data_limit, batch_size, pad_idx=2):
+    test_data = []
+    for line in open('data/test.bpe.de-en'):
+        src_line, tgt_line = line.split('\t')
+        src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
+        tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
+        if max_len is None or len(src_words) <= max_len:
+            test_data.append((src_words, tgt_words))
+    test_data = batch_data(test_data[:data_limit], batch_size)
+
+    # TODO store vocab in model
+    src_vocab, tgt_vocab = Vocab(), Vocab()
+    with open('data/vocab.de') as vocab_file:
+        for line in vocab_file.readlines():
+            src_vocab.add(line.split()[0])
+    with open('data/vocab.en') as vocab_file:
+        for line in vocab_file.readlines():
+            tgt_vocab.add(line.split()[0])
+
+    model = torch.load('model').to(device)
+
+    candidate, reference = [], []
+    with torch.no_grad():
+        for batch in tqdm.tqdm(test_data):
+            src, tgt = zip(*batch)
+            src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
+            tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
+            batch = Batch(src, tgt, pad_idx)
+            model_out = greedy_decode(model, batch.src, batch.src_mask)
+            for i in range(batch_size):
+                reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[i] if x != pad_idx]))
+                candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out[i] if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
+
+    bleu_score = bleu.corpus_score(candidate, [reference])
+    chrf_score = chrf.corpus_score(candidate, [reference])
+    print(chrf_score, ';', bleu_score, flush=True)
+    with open('data/test.out', 'w') as outfile:
+        for words in candidate:
+            outfile.write(words.split('<BOS> ')[1].split('<EOS>')[0] + '\n')
 
 def translate(text, pad_idx=2):
     text = mt.tokenize(text, return_str=True)
@@ -430,54 +456,17 @@ def translate(text, pad_idx=2):
         for line in vocab_file.readlines():
             tgt_vocab.add(line.split()[0])
 
-    model = torch.load('model')
+    model = torch.load('model').to(device)
 
-    src = src_vocab.numberize(*text.split()).unsqueeze(0).cuda()
-    batch = Batch(src, pad=pad_idx)
-    model_out = greedy_decode(model, batch.src, batch.src_mask, 64, 0)[0]
+    src = src_vocab.numberize(*text.split()).unsqueeze(0).to(device)
+    src_mask = Batch(src, pad=pad_idx).src_mask
+    model_out = greedy_decode(model, src, src_mask)[0]
     translation = detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx])
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
 
-def score_test(batch_size=1, data_limit=1000000, max_len=30, pad_idx=2):
-    test_data = []
-    for line in open('data/test.bpe.de-en'):
-        src_line, tgt_line = line.split('\t')
-        src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
-        tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
-        if max_len is None or len(src_words) <= max_len:
-            test_data.append((src_words, tgt_words))
-    test_data = batch_data(test_data[:data_limit], batch_size)
-
-    src_vocab, tgt_vocab = Vocab(), Vocab()
-    with open('data/vocab.de') as vocab_file:
-        for line in vocab_file.readlines():
-            src_vocab.add(line.split()[0])
-    with open('data/vocab.en') as vocab_file:
-        for line in vocab_file.readlines():
-            tgt_vocab.add(line.split()[0])
-
-    model = torch.load('model')
-
-    candidate, reference = [], []
-    for batch in tqdm.tqdm(test_data):
-        src, tgt = zip(*batch)
-        src = torch.stack([src_vocab.numberize(*words) for words in src]).cuda()
-        tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).cuda()
-        batch = Batch(src, tgt, pad_idx)
-        model_out = greedy_decode(model, batch.src, batch.src_mask, 64, 0)
-        for i in range(batch_size):
-            reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[i] if x != pad_idx]))
-            candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out[i] if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
-    bleu_score = bleu.corpus_score(candidate, [reference])
-    chrf_score = chrf.corpus_score(candidate, [reference])
-    print(chrf_score, ';', bleu_score, flush=True)
-    with open('data/test.out', 'w') as outfile:
-        for words in candidate:
-            outfile.write(words.split('<BOS> ')[1].split('<EOS>')[0] + '\n')
-
 if __name__ == '__main__':
-    # train_model()
+    # train_model(max_len=30, data_limit=1000000, batch_size=16, num_epochs=10, lr=1e-4)
+    # score_test(max_len=30, data_limit=1000000, batch_size=16)
     # print(translate('Im Juli, möchte ich nach Europa reisen.'))
     print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
     # print(translate('Arjun solltet seine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
-    # score_test(batch_size=16)

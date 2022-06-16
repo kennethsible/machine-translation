@@ -4,3 +4,4 @@ data/train.*
 data/test.*
 data/vocab.*
 data/out
+DEBUG.log

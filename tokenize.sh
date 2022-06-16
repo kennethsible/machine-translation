@@ -9,6 +9,7 @@ echo -e "\nLearning Model Vocabulary with BPE..."
 cat data/train.tokenized.de data/train.tokenized.en | subword-nmt learn-bpe -s 18000 -o data/out
 subword-nmt apply-bpe -c data/out < data/train.tokenized.de | subword-nmt get-vocab > data/vocab.de
 subword-nmt apply-bpe -c data/out < data/train.tokenized.en | subword-nmt get-vocab > data/vocab.en
+paste data/vocab.de data/vocab.en > data/vocab.de-en
 echo "Done."
 
 echo -e "\nPerforming Subword Tokenization with BPE..."
@@ -18,6 +19,7 @@ echo "Done."
 
 echo -e "\nCombining Source and Target Training Data..."
 paste data/train.bpe.de data/train.bpe.en > data/train.bpe.de-en
+paste data/train.bpe.de data/train.bpe.en > data/train.bpe.en-de
 echo "Done."
 
 echo -e "\nPerforming Word Tokenization with Moses..."
@@ -32,5 +34,5 @@ echo "Done."
 
 echo -e "\nCombining Source and Target Testing Data..."
 paste data/train.bpe.de data/test.bpe.en > data/test.bpe.de-en
-paste data/train.bpe.en data/test.bpe.de > data/test.bpe.en-de # TODO
+paste data/train.bpe.en data/test.bpe.de > data/test.bpe.en-de
 echo "Done."

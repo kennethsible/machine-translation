@@ -3,6 +3,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sacremoses import MosesTokenizer, MosesDetokenizer
 from subword_nmt.apply_bpe import BPE, read_vocabulary
 from sacrebleu.metrics import BLEU, CHRF
+from datetime import timedelta
 from torch import nn
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -278,8 +279,8 @@ class Batch:
 def train_epoch(data, model, loss_compute, optimizer=None, mode='train'):
     total_loss = 0
     total_tokens = 0
-    for batch in tqdm.tqdm(data):
-    # for batch in data:
+    progress = tqdm.tqdm if mode == 'train' else iter
+    for batch in progress(data):
         out = model(batch.src, batch.tgt, batch.src_mask, batch.tgt_mask)
         loss = loss_compute(out, batch.tgt_y)
         if mode == 'train':
@@ -326,6 +327,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
         tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
         if max_len is None or len(src_words) <= max_len:
             train_data.append((src_words, tgt_words))
+    open('DEBUG.log', 'w').close()
 
     split_point = math.ceil(0.995 * len(train_data))
     valid_data = batch_data(train_data[split_point:], batch_size)
@@ -379,11 +381,14 @@ def train_model(max_len, batch_size, num_epochs, lr):
             LossCompute(model.generator, criterion),
             mode='eval',
         )
-        elapsed = time.time() - start
+        elapsed = timedelta(seconds=(time.time() - start))
 
         scheduler.step(valid_loss)
         lr = optimizer.param_groups[0]['lr']
-        print(f'[{epoch + 1}] Train Loss: {train_loss} | Valid Loss: {valid_loss} | Learning Rate: {lr} | Elapsed Time: {elapsed}', flush=True)
+        with open('DEBUG.log', 'a') as outfile:
+            output = f'[{epoch + 1}] Train Loss: {train_loss} | Valid Loss: {valid_loss} | Learning Rate: {lr} | Elapsed Time: {elapsed}'
+            print(output, flush=True)
+            outfile.write(output + '\n')
 
         candidate, reference = [], []
         with torch.no_grad():
@@ -399,9 +404,11 @@ def train_model(max_len, batch_size, num_epochs, lr):
 
         bleu_score = bleu.corpus_score(candidate, [reference])
         chrf_score = chrf.corpus_score(candidate, [reference])
-        print(chrf_score, ';', bleu_score, flush=True)
+        with open('DEBUG.log', 'a') as outfile:
+            output = f'{chrf_score} ; {bleu_score}\n'
+            print(output, flush=True)
+            outfile.write(output + '\n')
         if bleu_score.score > best_score:
-            print('saving best model...')
             torch.save(model, 'model')
             best_score = bleu_score.score
         print()
@@ -421,8 +428,7 @@ def score_model(max_len, batch_size, pad_idx=2):
 
     candidate, reference = [], []
     with torch.no_grad():
-        # for batch in tqdm.tqdm(test_data):
-        for batch in test_data:
+        for batch in tqdm.tqdm(test_data):
             src, tgt = zip(*batch)
             src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
             tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
@@ -453,8 +459,8 @@ def translate(text, pad_idx=2):
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
 
 if __name__ == '__main__':
-    train_model(max_len=256, batch_size=16, num_epochs=10, lr=1e-4)
-    # score_model(max_len=256, batch_size=16)
+    train_model(max_len=256, batch_size=32, num_epochs=10, lr=1e-4)
     # print(translate('Im Juli, möchte ich nach Europa reisen.'))
     # print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
     # print(translate('Arjun solltet seine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
+    # score_model(max_len=256, batch_size=32)

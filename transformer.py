@@ -192,11 +192,13 @@ class Model(nn.Module):
 
     def __init__(self, src_vocab, tgt_vocab, d_model=512, d_ff=2048, h=8, dropout=0.1, N=6):
         super().__init__()
+        self.src_vocab = src_vocab
+        self.tgt_vocab = tgt_vocab
         self.encoder = Encoder(d_model, d_ff, h, dropout, N)
         self.decoder = Decoder(d_model, d_ff, h, dropout, N)
-        self.src_embed = nn.Sequential(Embedding(d_model, src_vocab), PositionalEncoding(d_model, dropout))
-        self.tgt_embed = nn.Sequential(Embedding(d_model, tgt_vocab), PositionalEncoding(d_model, dropout))
-        self.generator = LogSoftmax(d_model, tgt_vocab)
+        self.src_embed = nn.Sequential(Embedding(d_model, len(src_vocab)), PositionalEncoding(d_model, dropout))
+        self.tgt_embed = nn.Sequential(Embedding(d_model, len(tgt_vocab)), PositionalEncoding(d_model, dropout))
+        self.generator = LogSoftmax(d_model, len(tgt_vocab))
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
@@ -274,7 +276,8 @@ class Batch:
 def train_epoch(data, model, loss_compute, optimizer=None, mode='train'):
     total_loss = 0
     total_tokens = 0
-    for batch in data:
+    for batch in tqdm.tqdm(data):
+    # for batch in data:
         out = model(batch.src, batch.tgt, batch.src_mask, batch.tgt_mask)
         loss = loss_compute(out, batch.tgt_y)
         if mode == 'train':
@@ -286,7 +289,7 @@ def train_epoch(data, model, loss_compute, optimizer=None, mode='train'):
         del loss
     return total_loss / total_tokens
 
-def greedy_decode(model, src, src_mask, max_len=64, start_word=0):
+def greedy_decode(model, src, src_mask, max_len=256, start_word=0):
     memory = model.encode(src, src_mask)
     tgt = torch.full((src.size(0), 1), start_word).type_as(src)
     for _ in range(max_len - 1):
@@ -313,7 +316,7 @@ def batch_data(data, batch_size):
         batched.append(batch)
     return batched
 
-def train_model(max_len, data_limit, batch_size, num_epochs, lr):
+def train_model(max_len, batch_size, num_epochs, lr):
     train_data = []
     for line in open('data/train.bpe.de-en'):
         src_line, tgt_line = line.split('\t')
@@ -322,12 +325,9 @@ def train_model(max_len, data_limit, batch_size, num_epochs, lr):
         if max_len is None or len(src_words) <= max_len:
             train_data.append((src_words, tgt_words))
 
-    assert data_limit < len(train_data)
-    valid_start = math.ceil(0.995 * data_limit)
-    valid_data = batch_data(train_data[valid_start:data_limit], batch_size)
-    assert len(valid_data) == (data_limit - valid_start)//batch_size
-    train_data = batch_data(train_data[:valid_start], batch_size)
-    assert len(train_data) == valid_start//batch_size
+    split_point = math.ceil(0.995 * len(train_data))
+    valid_data = batch_data(train_data[split_point:], batch_size)
+    train_data = batch_data(train_data[:split_point], batch_size)
 
     src_vocab, tgt_vocab = Vocab(), Vocab()
     with open('data/vocab.de') as vocab_file:
@@ -336,16 +336,18 @@ def train_model(max_len, data_limit, batch_size, num_epochs, lr):
     with open('data/vocab.en') as vocab_file:
         for line in vocab_file.readlines():
             tgt_vocab.add(line.split()[0])
-
     pad_idx = tgt_vocab.numberize('<PAD>').item()
-    model = Model(len(src_vocab), len(tgt_vocab)).to(device)
+
+    model = Model(src_vocab, tgt_vocab).to(device)
+    model.src_embed[0].emb.weight = model.tgt_embed[0].emb.weight
+    model.generator.proj.weight = model.tgt_embed[0].emb.weight
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = ReduceLROnPlateau(optimizer)
 
-    # best_score = 0.
+    best_score = 0.
     for epoch in range(num_epochs):
         random.shuffle(train_data)
     
@@ -384,27 +386,28 @@ def train_model(max_len, data_limit, batch_size, num_epochs, lr):
         lr = optimizer.param_groups[0]['lr']
         print(f'[{epoch + 1}] Train Loss: {train_loss} | Valid Loss: {valid_loss} | Learning Rate: {lr} | Elapsed Time: {elapsed}', flush=True)
 
-        # TODO score_test()
-        # candidate, reference = [], []
-        # for batch in tqdm.tqdm(valid_data):
-        #     for src, tgt in batch:
-        #         src = src_vocab.numberize(*src).unsqueeze(0).to(device)
-        #         tgt = tgt_vocab.numberize(*tgt).unsqueeze(0).to(device)
-        #         batch = Batch(src, tgt, pad_idx)
-        #         model_out = greedy_decode(model, batch.src, batch.src_mask)[0]
-        #         reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[0] if x != pad_idx]))
-        #         candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
+        candidate, reference = [], []
+        with torch.no_grad():
+            for batch in valid_data:
+                src, tgt = zip(*batch)
+                src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
+                tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
+                batch = Batch(src, tgt, pad_idx)
+                model_out = greedy_decode(model, batch.src, batch.src_mask)
+                for i in range(batch_size):
+                    reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[i] if x != pad_idx]))
+                    candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out[i] if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
 
-        # bleu_score = bleu.corpus_score(candidate, [reference])
-        # chrf_score = chrf.corpus_score(candidate, [reference])
-        # print(chrf_score, ';', bleu_score, flush=True)
-        # if bleu_score.score > best_score:
-        #     print('saving best model...')
-        #     torch.save(model, 'model')
-        #     best_score = bleu_score.score
-        # print()
+        bleu_score = bleu.corpus_score(candidate, [reference])
+        chrf_score = chrf.corpus_score(candidate, [reference])
+        print(chrf_score, ';', bleu_score, flush=True)
+        if bleu_score.score > best_score:
+            print('saving best model...')
+            torch.save(model, 'model')
+            best_score = bleu_score.score
+        print()
 
-def score_test(max_len, data_limit, batch_size, pad_idx=2):
+def score_model(max_len, batch_size, pad_idx=2):
     test_data = []
     for line in open('data/test.bpe.de-en'):
         src_line, tgt_line = line.split('\t')
@@ -412,22 +415,15 @@ def score_test(max_len, data_limit, batch_size, pad_idx=2):
         tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
         if max_len is None or len(src_words) <= max_len:
             test_data.append((src_words, tgt_words))
-    test_data = batch_data(test_data[:data_limit], batch_size)
-
-    # TODO store vocab in model
-    src_vocab, tgt_vocab = Vocab(), Vocab()
-    with open('data/vocab.de') as vocab_file:
-        for line in vocab_file.readlines():
-            src_vocab.add(line.split()[0])
-    with open('data/vocab.en') as vocab_file:
-        for line in vocab_file.readlines():
-            tgt_vocab.add(line.split()[0])
+    test_data = batch_data(test_data, batch_size)
 
     model = torch.load('model').to(device)
+    src_vocab, tgt_vocab = model.src_vocab, model.tgt_vocab
 
     candidate, reference = [], []
     with torch.no_grad():
-        for batch in tqdm.tqdm(test_data):
+        # for batch in tqdm.tqdm(test_data):
+        for batch in test_data:
             src, tgt = zip(*batch)
             src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
             tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
@@ -448,15 +444,8 @@ def translate(text, pad_idx=2):
     text = mt.tokenize(text, return_str=True)
     text = bpe.process_line(text)
 
-    src_vocab, tgt_vocab = Vocab(), Vocab()
-    with open('data/vocab.de') as vocab_file:
-        for line in vocab_file.readlines():
-            src_vocab.add(line.split()[0])
-    with open('data/vocab.en') as vocab_file:
-        for line in vocab_file.readlines():
-            tgt_vocab.add(line.split()[0])
-
     model = torch.load('model').to(device)
+    src_vocab, tgt_vocab = model.src_vocab, model.tgt_vocab
 
     src = src_vocab.numberize(*text.split()).unsqueeze(0).to(device)
     src_mask = Batch(src, pad=pad_idx).src_mask
@@ -465,8 +454,8 @@ def translate(text, pad_idx=2):
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
 
 if __name__ == '__main__':
-    # train_model(max_len=30, data_limit=1000000, batch_size=16, num_epochs=10, lr=1e-4)
-    # score_test(max_len=30, data_limit=1000000, batch_size=16)
+    train_model(max_len=30, batch_size=16, num_epochs=10, lr=1e-4)
+    # score_model(max_len=256, batch_size=16)
     # print(translate('Im Juli, möchte ich nach Europa reisen.'))
-    print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
+    # print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
     # print(translate('Arjun solltet seine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))

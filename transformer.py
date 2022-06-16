@@ -232,6 +232,8 @@ class Vocab:
     def __init__(self):
         self.num_to_word = ['<BOS>', '<EOS>', '<PAD>', '<UNK>']
         self.word_to_num = {word: i for i, word in enumerate(self.num_to_word)}
+        self.padding_idx = self.word_to_num['<PAD>']
+        self.default_idx = self.word_to_num['<UNK>']
 
     def add(self, word):
         if word not in self.word_to_num:
@@ -329,14 +331,11 @@ def train_model(max_len, batch_size, num_epochs, lr):
     valid_data = batch_data(train_data[split_point:], batch_size)
     train_data = batch_data(train_data[:split_point], batch_size)
 
-    src_vocab, tgt_vocab = Vocab(), Vocab()
-    with open('data/vocab.de') as vocab_file:
+    src_vocab = tgt_vocab = Vocab()
+    with open('data/vocab.de-en') as vocab_file:
         for line in vocab_file.readlines():
             src_vocab.add(line.split()[0])
-    with open('data/vocab.en') as vocab_file:
-        for line in vocab_file.readlines():
-            tgt_vocab.add(line.split()[0])
-    pad_idx = tgt_vocab.numberize('<PAD>').item()
+    pad_idx = tgt_vocab.padding_idx
 
     model = Model(src_vocab, tgt_vocab).to(device)
     model.src_embed[0].emb.weight = model.tgt_embed[0].emb.weight
@@ -444,17 +443,17 @@ def translate(text, pad_idx=2):
     text = mt.tokenize(text, return_str=True)
     text = bpe.process_line(text)
 
-    model = torch.load('model').to(device)
+    model = torch.load('model')
     src_vocab, tgt_vocab = model.src_vocab, model.tgt_vocab
 
-    src = src_vocab.numberize(*text.split()).unsqueeze(0).to(device)
+    src = src_vocab.numberize(*text.split()).unsqueeze(0)
     src_mask = Batch(src, pad=pad_idx).src_mask
     model_out = greedy_decode(model, src, src_mask)[0]
     translation = detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx])
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
 
 if __name__ == '__main__':
-    train_model(max_len=30, batch_size=16, num_epochs=10, lr=1e-4)
+    train_model(max_len=256, batch_size=16, num_epochs=10, lr=1e-4)
     # score_model(max_len=256, batch_size=16)
     # print(translate('Im Juli, möchte ich nach Europa reisen.'))
     # print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))

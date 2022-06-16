@@ -1,10 +1,13 @@
 import torch, copy, math, tqdm, random, re, time
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sacremoses import MosesTokenizer, MosesDetokenizer
+from subword_nmt.apply_bpe import BPE, read_vocabulary
 from sacrebleu.metrics import BLEU, CHRF
 from torch import nn
 
 bleu, chrf = BLEU(), CHRF()
 mt, md = MosesTokenizer(lang='de'), MosesDetokenizer(lang='en')
+bpe = BPE(open('data/out'), vocab=read_vocabulary(open('data/vocab.de'), 50))
 
 def detokenize(words):
     return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(words))
@@ -91,7 +94,6 @@ class MultiHeadedAttention(nn.Module):
         d_k = query.size(-1)
         scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
         if mask is not None:
-            # print(scores.size(), mask.size()) # TODO
             scores = scores.masked_fill(mask == 0, -torch.inf) # -1e9
         p_attn = scores.softmax(dim=-1)
         if dropout is not None:
@@ -249,7 +251,7 @@ class Vocab:
 
 class Batch:
 
-    def __init__(self, src, tgt=None, pad=2):  # 2 = <blank>
+    def __init__(self, src, tgt=None, pad=2):
         self.src = src
         self.src_mask = (src != pad).unsqueeze(-2)
         if tgt is not None:
@@ -273,26 +275,16 @@ def train_epoch(data, model, loss_compute, optimizer=None, mode='train'):
         out = model(batch.src, batch.tgt, batch.src_mask, batch.tgt_mask)
         loss, loss_node = loss_compute(out, batch.tgt_y, batch.ntokens)
         if mode == 'train':
+            optimizer.zero_grad()
             loss_node.backward()
             optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-        total_loss += loss
+        total_loss += loss.item()
         total_tokens += batch.ntokens
         del loss
         del loss_node
     return total_loss / total_tokens
 
-def data_gen(V, batch_size, nbatches):
-    "Generate random data for a src-tgt copy task."
-    for i in range(nbatches):
-        data = torch.randint(1, V, size=(batch_size, 10))
-        data[:, 0] = 1
-        src = data.requires_grad_(False).clone().detach()
-        tgt = data.requires_grad_(False).clone().detach()
-        yield Batch(src, tgt, 0)
-
-class SimpleLossCompute:
-    "A simple loss compute and train function."
+class LossCompute:
 
     def __init__(self, generator, criterion):
         self.generator = generator
@@ -310,56 +302,13 @@ class SimpleLossCompute:
 
 def greedy_decode(model, src, src_mask, max_len, start_symbol):
     memory = model.encode(src, src_mask)
-    ys = torch.zeros(1, 1).fill_(start_symbol).type_as(src.data)
-    ys.cuda()
+    tgt = torch.full((src.size(0), 1), start_symbol).type_as(src)
     for _ in range(max_len - 1):
-        out = model.decode(
-            memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
-        )
+        out = model.decode(memory, src_mask, tgt, subsequent_mask(tgt.size(-1)).type_as(src))
         prob = model.generator(out[:, -1])
-        _, next_word = torch.max(prob, dim=1)
-        next_word = next_word.data[0]
-        ys = torch.cat(
-            [ys, torch.zeros(1, 1).type_as(src.data).fill_(next_word)], dim=1
-        )
-    return ys
-
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-
-def example_simple_model():
-    V = 11
-    criterion = nn.CrossEntropyLoss()
-    model = Model(V, V, N=2)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    scheduler = ReduceLROnPlateau(optimizer)
-
-    # batch_size = 80
-    # for epoch in range(25):
-    #     model.train()
-    #     train_loss = train_epoch(
-    #         data_gen(V, batch_size, 20),
-    #         model,
-    #         SimpleLossCompute(model.generator, criterion),
-    #         optimizer,
-    #         mode="train",
-    #     )
-    #     model.eval()
-    #     val_loss = train_epoch(
-    #         data_gen(V, batch_size, 5),
-    #         model,
-    #         SimpleLossCompute(model.generator, criterion),
-    #         mode="eval",
-    #     )
-    #     scheduler.step(val_loss)
-    #     lr = optimizer.param_groups[0]["lr"]
-    #     print(f'[{epoch + 1}] Train Loss: {train_loss.item()} | Val Loss: {val_loss.item()} | Learning Rate: {lr}\n')
-
-    model.eval()
-    src = torch.LongTensor([[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]])
-    max_len = src.shape[1]
-    src_mask = torch.ones(1, 1, max_len)
-    print(greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0))
+        next_word = torch.argmax(prob, dim=-1)
+        tgt = torch.cat([tgt, next_word.view(src.size(0), 1)], dim=-1)
+    return tgt
 
 def batch_data(data, batch_size):
     data.sort(key=lambda x: len(x[0]))
@@ -379,7 +328,7 @@ def batch_data(data, batch_size):
     return batched
 
 def train_model():
-    MAX_LEN, DATA_LIMIT, BATCH_SIZE, NUM_EPOCHS = 30, 1000000, 64, 10
+    MAX_LEN, DATA_LIMIT, BATCH_SIZE, NUM_EPOCHS = 30, 1000000, 16, 10
 
     train_data = []
     for line in open('data/train.bpe.de-en'):
@@ -427,83 +376,52 @@ def train_model():
         train_loss = train_epoch(
             data,
             model,
-            SimpleLossCompute(model.generator, criterion),
+            LossCompute(model.generator, criterion),
             optimizer,
             mode='train',
         )
-        # torch.cuda.empty_cache()
 
-        with torch.no_grad():
-            model.eval()
-            data = []
-            for batch in valid_data:
-                src, tgt = zip(*batch)
-                src = torch.stack([src_vocab.numberize(*words) for words in src]).cuda()
-                tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).cuda()
-                data.append(Batch(src, tgt, pad_idx))
-            valid_loss = train_epoch(
-                data,
-                model,
-                SimpleLossCompute(model.generator, criterion),
-                mode='eval',
-            )
+        model.eval()
+        data = []
+        for batch in valid_data:
+            src, tgt = zip(*batch)
+            src = torch.stack([src_vocab.numberize(*words) for words in src]).cuda()
+            tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).cuda()
+            data.append(Batch(src, tgt, pad_idx))
+        valid_loss = train_epoch(
+            data,
+            model,
+            LossCompute(model.generator, criterion),
+            mode='eval',
+        )
         elapsed = time.time() - start
 
         scheduler.step(valid_loss)
         lr = optimizer.param_groups[0]['lr']
-        print(f'[{epoch + 1}] Train Loss: {train_loss.item()} | Valid Loss: {valid_loss.item()} | Learning Rate: {lr} | Elapsed Time: {elapsed}', flush=True)
-        # torch.cuda.empty_cache()
+        print(f'[{epoch + 1}] Train Loss: {train_loss} | Valid Loss: {valid_loss} | Learning Rate: {lr} | Elapsed Time: {elapsed}', flush=True)
 
-        del train_loss
-        del valid_loss
+        candidate, reference = [], []
+        for batch in tqdm.tqdm(valid_data): # TODO score_test()
+            for src, tgt in batch:
+                src = src_vocab.numberize(*src).unsqueeze(0).cuda()
+                tgt = tgt_vocab.numberize(*tgt).unsqueeze(0).cuda()
+                batch = Batch(src, tgt, pad_idx)
+                model_out = greedy_decode(model, batch.src, batch.src_mask, 64, 0)[0]
+                reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[0] if x != pad_idx]))
+                candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
+        bleu_score = bleu.corpus_score(candidate, [reference])
+        chrf_score = chrf.corpus_score(candidate, [reference])
+        print(chrf_score, ';', bleu_score, flush=True)
+        if bleu_score.score > best_score:
+            print('saving best model...')
+            torch.save(model, 'model')
+            best_score = bleu_score.score
+        print()
 
-        with torch.no_grad():
-            candidate, reference = [], []
-            for batch in valid_data:
-                # src, tgt = batch[0]
-                for src, tgt in batch:
-                    src = src_vocab.numberize(*src).unsqueeze(0).cuda()
-                    tgt = tgt_vocab.numberize(*tgt).unsqueeze(0).cuda()
-                    batch = Batch(src, tgt, pad_idx)
-                    model_out = greedy_decode(model, batch.src, batch.src_mask, 64, 0)[0]
-                    reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[0] if x != pad_idx]))
-                    candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
-            bleu_score = bleu.corpus_score(candidate, [reference])
-            chrf_score = chrf.corpus_score(candidate, [reference])
-            print(chrf_score, ';', bleu_score, flush=True)
-            if bleu_score.score > best_score:
-                print('saving best model...')
-                torch.save(model, 'model')
-                best_score = bleu_score.score
-            print()
+def translate(text, pad_idx=2):
+    text = mt.tokenize(text, return_str=True)
+    text = bpe.process_line(text)
 
-            # for i in range(5):
-            #     print("\nExample %d ========\n" % i)
-            #     src, tgt = zip(*valid_data[i])
-            #     src = src_vocab.numberize(*src[0]).unsqueeze(0)
-            #     tgt = tgt_vocab.numberize(*tgt[0]).unsqueeze(0)
-            #     rb = Batch(src, tgt, pad_idx)
-
-            #     src_tokens = [src_vocab.denumberize(x) for x in rb.src[0] if x != pad_idx]
-            #     tgt_tokens = [tgt_vocab.denumberize(x) for x in rb.tgt[0] if x != pad_idx]
-
-            #     print(
-            #         "Source Text (Input)        : "
-            #         + detokenize(src_tokens)
-            #     )
-            #     print(
-            #         "Target Text (Ground Truth) : "
-            #         + detokenize(tgt_tokens)
-            #     )
-            #     model_out = greedy_decode(model, rb.src, rb.src_mask, 64, 0)[0]
-            #     print(
-            #         "Model Output               : "
-            #         + detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>'
-            #     )
-
-def translate(text):
-    tokenized = mt.tokenize(text, return_str=True).split()
-    model = torch.load('model')
     src_vocab, tgt_vocab = Vocab(), Vocab()
     with open('data/vocab.de') as vocab_file:
         for line in vocab_file.readlines():
@@ -511,13 +429,55 @@ def translate(text):
     with open('data/vocab.en') as vocab_file:
         for line in vocab_file.readlines():
             tgt_vocab.add(line.split()[0])
-    src = src_vocab.numberize(*tokenized).unsqueeze(0).cuda()
-    pad_idx = 2
+
+    model = torch.load('model')
+
+    src = src_vocab.numberize(*text.split()).unsqueeze(0).cuda()
     batch = Batch(src, pad=pad_idx)
     model_out = greedy_decode(model, batch.src, batch.src_mask, 64, 0)[0]
-    return detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx]).split('<BOS>')[1].split('<EOS>')[0]
+    translation = detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx])
+    return translation.split('<BOS> ')[1].split('<EOS>')[0]
+
+def score_test(batch_size=1, data_limit=1000000, max_len=30, pad_idx=2):
+    test_data = []
+    for line in open('data/test.bpe.de-en'):
+        src_line, tgt_line = line.split('\t')
+        src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
+        tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
+        if max_len is None or len(src_words) <= max_len:
+            test_data.append((src_words, tgt_words))
+    test_data = batch_data(test_data[:data_limit], batch_size)
+
+    src_vocab, tgt_vocab = Vocab(), Vocab()
+    with open('data/vocab.de') as vocab_file:
+        for line in vocab_file.readlines():
+            src_vocab.add(line.split()[0])
+    with open('data/vocab.en') as vocab_file:
+        for line in vocab_file.readlines():
+            tgt_vocab.add(line.split()[0])
+
+    model = torch.load('model')
+
+    candidate, reference = [], []
+    for batch in tqdm.tqdm(test_data):
+        src, tgt = zip(*batch)
+        src = torch.stack([src_vocab.numberize(*words) for words in src]).cuda()
+        tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).cuda()
+        batch = Batch(src, tgt, pad_idx)
+        model_out = greedy_decode(model, batch.src, batch.src_mask, 64, 0)
+        for i in range(batch_size):
+            reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[i] if x != pad_idx]))
+            candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out[i] if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
+    bleu_score = bleu.corpus_score(candidate, [reference])
+    chrf_score = chrf.corpus_score(candidate, [reference])
+    print(chrf_score, ';', bleu_score, flush=True)
+    with open('data/test.out', 'w') as outfile:
+        for words in candidate:
+            outfile.write(words.split('<BOS> ')[1].split('<EOS>')[0] + '\n')
 
 if __name__ == '__main__':
-    # example_simple_model()
-    train_model()
-    # print(translate('Im Juli, möchte ich nach Europa reisen'))
+    # train_model()
+    # print(translate('Im Juli, möchte ich nach Europa reisen.'))
+    print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
+    # print(translate('Arjun solltet seine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
+    # score_test(batch_size=16)

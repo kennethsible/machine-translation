@@ -10,7 +10,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 bleu, chrf = BLEU(), CHRF()
 mt, md = MosesTokenizer(lang='de'), MosesDetokenizer(lang='en')
-bpe = BPE(open('data/out'), vocab=read_vocabulary(open('data/vocab.de'), 50))
+bpe = BPE(open('data/bpe.out'), vocab=read_vocabulary(open('data/vocab.bpe'), 50))
 
 def detokenize(words):
     return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(words))
@@ -321,7 +321,7 @@ def batch_data(data, batch_size):
 
 def train_model(max_len, batch_size, num_epochs, lr):
     train_data = []
-    for line in open('data/train.bpe.de-en'):
+    for line in open('data/train.tok.bpe.de-en'):
         src_line, tgt_line = line.split('\t')
         src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
         tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
@@ -334,7 +334,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
     train_data = batch_data(train_data[:split_point], batch_size)
 
     src_vocab = tgt_vocab = Vocab()
-    with open('data/vocab.de-en') as vocab_file:
+    with open('data/vocab.bpe') as vocab_file:
         for line in vocab_file.readlines():
             src_vocab.add(line.split()[0])
     pad_idx = tgt_vocab.padding_idx
@@ -415,7 +415,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
 
 def score_model(max_len, batch_size, pad_idx=2):
     test_data = []
-    for line in open('data/test.bpe.de-en'):
+    for line in open('data/test.tok.bpe.de-en'):
         src_line, tgt_line = line.split('\t')
         src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
         tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']

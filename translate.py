@@ -281,6 +281,10 @@ def train_epoch(data, model, loss_compute, optimizer=None, mode='train'):
     total_tokens = 0
     progress = tqdm.tqdm if mode == 'train' else iter
     for batch in progress(data):
+        src, tgt = zip(*batch)
+        src = torch.stack([model.src_vocab.numberize(*words) for words in src]).to(device)
+        tgt = torch.stack([model.tgt_vocab.numberize(*words) for words in tgt]).to(device)
+        batch = Batch(src, tgt, 2)
         out = model(batch.src, batch.tgt, batch.src_mask, batch.tgt_mask)
         loss = loss_compute(out, batch.tgt_y)
         if mode == 'train':
@@ -325,7 +329,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
         src_line, tgt_line = line.split('\t')
         src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
         tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
-        if max_len is None or len(src_words) <= max_len:
+        if len(src_words) <= max_len and len(tgt_words) <= max_len:
             train_data.append((src_words, tgt_words))
     open('DEBUG.log', 'w').close()
 
@@ -354,14 +358,8 @@ def train_model(max_len, batch_size, num_epochs, lr):
     
         start = time.time()
         model.train()
-        data = []
-        for batch in train_data:
-            src, tgt = zip(*batch)
-            src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
-            tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
-            data.append(Batch(src, tgt, pad_idx))
         train_loss = train_epoch(
-            data,
+            train_data,
             model,
             LossCompute(model.generator, criterion),
             optimizer,
@@ -369,14 +367,8 @@ def train_model(max_len, batch_size, num_epochs, lr):
         )
 
         model.eval()
-        data = []
-        for batch in valid_data:
-            src, tgt = zip(*batch)
-            src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
-            tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
-            data.append(Batch(src, tgt, pad_idx))
         valid_loss = train_epoch(
-            data,
+            valid_data,
             model,
             LossCompute(model.generator, criterion),
             mode='eval',
@@ -446,13 +438,13 @@ def score_model(max_len, batch_size, pad_idx=2):
             outfile.write(words.split('<BOS> ')[1].split('<EOS>')[0] + '\n')
 
 def translate(text, pad_idx=2):
-    text = mt.tokenize(text, return_str=True)
-    text = bpe.process_line(text)
+    text = bpe.process_line(mt.tokenize(text, return_str=True))
+    words = ['<BOS>'] + text.split() + ['<EOS>']
 
     model = torch.load('model')
     src_vocab, tgt_vocab = model.src_vocab, model.tgt_vocab
 
-    src = src_vocab.numberize(*text.split()).unsqueeze(0)
+    src = src_vocab.numberize(*words.split()).unsqueeze(0)
     src_mask = Batch(src, pad=pad_idx).src_mask
     model_out = greedy_decode(model, src, src_mask)[0]
     translation = detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx])

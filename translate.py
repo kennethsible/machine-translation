@@ -1,16 +1,15 @@
-import torch, random, copy, math, tqdm, time, re
+import torch, random, copy, math, time, tqdm, re
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sacremoses import MosesTokenizer, MosesDetokenizer
-from subword_nmt.apply_bpe import BPE, read_vocabulary
 from sacrebleu.metrics import BLEU, CHRF
+from subword_nmt.apply_bpe import BPE
 from datetime import timedelta
 from torch import nn
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-bleu, chrf = BLEU(), CHRF()
+bleu, chrf, bpe = BLEU(), CHRF(), BPE(open('data/bpe.out'))
 mt, md = MosesTokenizer(lang='de'), MosesDetokenizer(lang='en')
-bpe = BPE(open('data/bpe.out'), vocab=read_vocabulary(open('data/vocab.bpe'), 50))
 
 def detokenize(words):
     return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(words))
@@ -197,9 +196,9 @@ class Model(nn.Module):
         self.tgt_vocab = tgt_vocab
         self.encoder = Encoder(d_model, d_ff, h, dropout, N)
         self.decoder = Decoder(d_model, d_ff, h, dropout, N)
-        self.src_embed = nn.Sequential(Embedding(d_model, len(src_vocab)), PositionalEncoding(d_model, dropout))
-        self.tgt_embed = nn.Sequential(Embedding(d_model, len(tgt_vocab)), PositionalEncoding(d_model, dropout))
-        self.generator = LogSoftmax(d_model, len(tgt_vocab))
+        self.src_embed = nn.Sequential(Embedding(d_model, src_vocab), PositionalEncoding(d_model, dropout))
+        self.tgt_embed = nn.Sequential(Embedding(d_model, tgt_vocab), PositionalEncoding(d_model, dropout))
+        self.generator = LogSoftmax(d_model, tgt_vocab)
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
@@ -296,7 +295,7 @@ def train_epoch(data, model, loss_compute, optimizer=None, mode='train'):
         del loss
     return total_loss / total_tokens
 
-def greedy_decode(model, src, src_mask, max_len=256, start_word=0):
+def greedy_decode(model, src, src_mask, max_len=256, start_word=0, end_word=1):
     memory = model.encode(src, src_mask)
     tgt = torch.full((src.size(0), 1), start_word).type_as(src)
     for _ in range(max_len - 1):
@@ -304,6 +303,7 @@ def greedy_decode(model, src, src_mask, max_len=256, start_word=0):
         prob = model.generator(out[:, -1])
         next_word = torch.argmax(prob, dim=-1)
         tgt = torch.cat([tgt, next_word.view(src.size(0), 1)], dim=-1)
+        if next_word == end_word: break
     return tgt
 
 def batch_data(data, batch_size):
@@ -343,7 +343,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
             src_vocab.add(line.split()[0])
     pad_idx = tgt_vocab.padding_idx
 
-    model = Model(src_vocab, tgt_vocab).to(device)
+    model = Model(len(src_vocab), len(tgt_vocab)).to(device)
     model.src_embed[0].emb.weight = model.tgt_embed[0].emb.weight
     model.generator.proj.weight = model.tgt_embed[0].emb.weight
 
@@ -401,7 +401,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
             print(output, flush=True)
             outfile.write(output + '\n')
         if bleu_score.score > best_score:
-            torch.save(model, 'model')
+            torch.save(model.state_dict(), 'model_de-en.pt')
             best_score = bleu_score.score
         print()
 
@@ -415,8 +415,15 @@ def score_model(max_len, batch_size, pad_idx=2):
             test_data.append((src_words, tgt_words))
     test_data = batch_data(test_data, batch_size)
 
-    model = torch.load('model').to(device)
-    src_vocab, tgt_vocab = model.src_vocab, model.tgt_vocab
+    src_vocab = tgt_vocab = Vocab()
+    with open('data/vocab.bpe') as vocab_file:
+        for line in vocab_file.readlines():
+            src_vocab.add(line.split()[0])
+
+    # model = torch.load('model_de-en.pt').to(device)
+    model = Model(len(src_vocab), len(tgt_vocab)).to(device)
+    model.load_state_dict(torch.load('model_de-en.pt'))
+    model.eval()
 
     candidate, reference = [], []
     with torch.no_grad():
@@ -437,16 +444,21 @@ def score_model(max_len, batch_size, pad_idx=2):
         for words in candidate:
             outfile.write(words.split('<BOS> ')[1].split('<EOS>')[0] + '\n')
 
-def translate(text, pad_idx=2):
+def translate(text):
     text = bpe.process_line(mt.tokenize(text, return_str=True))
     words = ['<BOS>'] + text.split() + ['<EOS>']
 
-    model = torch.load('model')
+    # model = torch.load('model_de-en.pt', map_location=torch.device('cpu'))
+    model = Model(len(src_vocab), len(tgt_vocab)).to(device)
+    model.load_state_dict(torch.load('model_de-en.pt'))
+    model.eval()
     src_vocab, tgt_vocab = model.src_vocab, model.tgt_vocab
 
-    src = src_vocab.numberize(*words.split()).unsqueeze(0)
-    src_mask = Batch(src, pad=pad_idx).src_mask
-    model_out = greedy_decode(model, src, src_mask)[0]
+    pad_idx = src_vocab.padding_idx
+    src = src_vocab.numberize(*words).unsqueeze(0)
+    batch = Batch(src, pad=pad_idx)
+
+    model_out = greedy_decode(model, batch.src, batch.src_mask)[0]
     translation = detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx])
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
 

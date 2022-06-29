@@ -275,14 +275,14 @@ class Batch:
         tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(tgt_mask.detach())
         return tgt_mask
 
-def train_epoch(data, model, loss_compute, optimizer=None, mode='train'):
+def train_epoch(data, model, src_vocab, tgt_vocab, loss_compute, optimizer=None, mode='train'):
     total_loss = 0
     total_tokens = 0
     progress = tqdm.tqdm if mode == 'train' else iter
     for batch in progress(data):
         src, tgt = zip(*batch)
-        src = torch.stack([model.src_vocab.numberize(*words) for words in src]).to(device)
-        tgt = torch.stack([model.tgt_vocab.numberize(*words) for words in tgt]).to(device)
+        src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
+        tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
         batch = Batch(src, tgt, 2)
         out = model(batch.src, batch.tgt, batch.src_mask, batch.tgt_mask)
         loss = loss_compute(out, batch.tgt_y)
@@ -361,6 +361,8 @@ def train_model(max_len, batch_size, num_epochs, lr):
         train_loss = train_epoch(
             train_data,
             model,
+            src_vocab,
+            tgt_vocab,
             LossCompute(model.generator, criterion),
             optimizer,
             mode='train',
@@ -370,6 +372,8 @@ def train_model(max_len, batch_size, num_epochs, lr):
         valid_loss = train_epoch(
             valid_data,
             model,
+            src_vocab,
+            tgt_vocab,
             LossCompute(model.generator, criterion),
             mode='eval',
         )
@@ -448,11 +452,15 @@ def translate(text):
     text = bpe.process_line(mt.tokenize(text, return_str=True))
     words = ['<BOS>'] + text.split() + ['<EOS>']
 
+    src_vocab = tgt_vocab = Vocab()
+    with open('data/vocab.bpe') as vocab_file:
+        for line in vocab_file.readlines():
+            src_vocab.add(line.split()[0])
+
     # model = torch.load('model_de-en.pt', map_location=torch.device('cpu'))
     model = Model(len(src_vocab), len(tgt_vocab)).to(device)
     model.load_state_dict(torch.load('model_de-en.pt'))
     model.eval()
-    src_vocab, tgt_vocab = model.src_vocab, model.tgt_vocab
 
     pad_idx = src_vocab.padding_idx
     src = src_vocab.numberize(*words).unsqueeze(0)

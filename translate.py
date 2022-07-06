@@ -11,13 +11,14 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 bleu, chrf, bpe = BLEU(), CHRF(), BPE(open('data/bpe.out'))
 mt, md = MosesTokenizer(lang='de'), MosesDetokenizer(lang='en')
 
-def detokenize(words):
-    return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(words))
+def detokenize(input):
+    return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(input))
 
 def clone(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
 class Embedding(nn.Module):
+
     def __init__(self, d_model, vocab):
         super().__init__()
         self.emb = nn.Embedding(vocab, d_model)
@@ -34,16 +35,14 @@ class PositionalEncoding(nn.Module):
 
         penc = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2) * -(math.log(10000.) / d_model)
-        )
+        div_term = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000) / d_model))
         penc[:, 0::2] = torch.sin(position * div_term)
         penc[:, 1::2] = torch.cos(position * div_term)
-        penc = penc.unsqueeze(0)
+        penc = penc.unsqueeze(0).requires_grad_(False)
         self.register_buffer('penc', penc)
 
     def forward(self, x):
-        x = x + self.penc[:, : x.size(1)].requires_grad_(False)
+        x = x + self.penc[:, : x.size(1)]
         return self.dropout(x)
 
 class FeedForward(nn.Module):
@@ -79,7 +78,7 @@ class LogSoftmax(nn.Module):
     def forward(self, x):
         return torch.log_softmax(self.proj(x), dim=-1)
 
-class MultiHeadedAttention(nn.Module):
+class MultiHeadAttention(nn.Module):
 
     def __init__(self, h, d_model, dropout=0.1):
         super().__init__()
@@ -142,7 +141,7 @@ class EncoderLayer(nn.Module):
 
     def __init__(self, d_model, d_ff, h, dropout):
         super().__init__()
-        self.att = MultiHeadedAttention(h, d_model)
+        self.att = MultiHeadAttention(h, d_model)
         self.ff = FeedForward(d_model, d_ff, dropout)
         self.sublayers = clone(SublayerConnection(d_model, dropout), 2)
 
@@ -166,8 +165,8 @@ class DecoderLayer(nn.Module):
 
     def __init__(self, d_model, d_ff, h, dropout):
         super().__init__()
-        self.att1 = MultiHeadedAttention(h, d_model)
-        self.att2 = MultiHeadedAttention(h, d_model)
+        self.att1 = MultiHeadAttention(h, d_model)
+        self.att2 = MultiHeadAttention(h, d_model)
         self.ff = FeedForward(d_model, d_ff, dropout)
         self.sublayers = clone(SublayerConnection(d_model, dropout), 3)
 
@@ -183,9 +182,9 @@ class Decoder(nn.Module):
         self.layers = clone(DecoderLayer(d_model, d_ff, h, dropout), N)
         self.norm = LayerNorm(d_model)
 
-    def forward(self, x, memory, src_mask, tgt_mask):
+    def forward(self, x, enc, src_mask, tgt_mask):
         for layer in self.layers:
-            x = layer(x, memory, src_mask, tgt_mask)
+            x = layer(x, enc, src_mask, tgt_mask)
         return self.norm(x)
 
 class Model(nn.Module):
@@ -209,8 +208,8 @@ class Model(nn.Module):
     def encode(self, src, src_mask):
         return self.encoder(self.src_embed(src), src_mask)
 
-    def decode(self, memory, src_mask, tgt, tgt_mask):
-        return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
+    def decode(self, enc, src_mask, tgt, tgt_mask):
+        return self.decoder(self.tgt_embed(tgt), enc, src_mask, tgt_mask)
 
 def subsequent_mask(size):
     att_shape = (1, size, size)
@@ -276,7 +275,7 @@ class Batch:
         return tgt_mask
 
 def train_epoch(data, model, src_vocab, tgt_vocab, loss_compute, optimizer=None, mode='train'):
-    total_loss = 0
+    total_loss = 0.
     total_tokens = 0
     progress = tqdm.tqdm if mode == 'train' else iter
     for batch in progress(data):
@@ -295,16 +294,81 @@ def train_epoch(data, model, src_vocab, tgt_vocab, loss_compute, optimizer=None,
         del loss
     return total_loss / total_tokens
 
-def greedy_decode(model, src, src_mask, max_len=256, start_word=0, end_word=1):
-    memory = model.encode(src, src_mask)
-    tgt = torch.full((src.size(0), 1), start_word).type_as(src)
+def greedy_search(model, batch, max_len=64, bos_idx=0, eos_idx=1):
+    enc = model.encode(batch.src, batch.src_mask)
+    tgt = torch.full((1, 1), bos_idx).type_as(batch.src)
     for _ in range(max_len - 1):
-        out = model.decode(memory, src_mask, tgt, subsequent_mask(tgt.size(-1)).type_as(src))
-        prob = model.generator(out[:, -1])
-        next_word = torch.argmax(prob, dim=-1)
-        tgt = torch.cat([tgt, next_word.view(src.size(0), 1)], dim=-1)
-        if next_word == end_word: break
+        tgt_mask = subsequent_mask(tgt.size(-1)).type_as(batch.src)
+        y = model.decode(enc, batch.src_mask, tgt, tgt_mask)
+        z = model.generator(y[:, -1])
+        max_idx = torch.argmax(z, dim=-1)
+        tgt = torch.cat([tgt, max_idx.unsqueeze(0)], dim=-1)
+        if max_idx == eos_idx: break
     return tgt
+
+import heapq
+
+class BeamState:
+
+    def __init__(self, score, path):
+        self.score = score
+        self.path = path
+
+    def normalize(self):
+        self.score /= len(self.path)
+
+    def __eq__(self, other):
+        return self.score == other.score
+
+    def __ne__(self, other):
+        return self.score != other.score
+
+    def __gt__(self, other):
+        return self.score > other.score
+
+    def __ge__(self, other):
+        return self.score >= other.score
+
+    def __lt__(self, other):
+        return self.score < other.score
+
+    def __le__(self, other):
+        return self.score <= other.score
+
+    def __len__(self):
+        return self.path.size(-1)
+
+def beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
+    enc = model.encode(batch.src, batch.src_mask)
+    frontier = [BeamState(0., torch.full((1, 1), bos_idx).long())]
+    complete = []
+    while len(frontier) > 0 and beam_size > 0:
+        extended_frontier = []
+        for state in frontier:
+            path_mask = subsequent_mask(state.path.size(-1)).long()
+            y = model.decode(enc, batch.src_mask, state.path, path_mask)
+            z = model.generator(y[:, -1]).squeeze(0)
+            for i in range(model.tgt_vocab):
+                successor = BeamState(state.score + z[i].item(),
+                    torch.cat([state.path, torch.full((1, 1), i).long()], dim=-1))
+                beam_update(successor, extended_frontier, beam_size)
+        frontier = extended_frontier
+        for state in frontier:
+            if len(state.path) > max_len or state.path.squeeze(0)[-1] == eos_idx:
+                complete.append(state)
+                frontier.remove(state)
+                beam_size -= 1
+    for state in complete:
+        state.normalize()
+    heapq.heapify(complete)
+    return [state.path for state in complete]
+
+def beam_update(state, frontier, beam_size):
+    if len(frontier) < beam_size:
+        heapq.heappush(frontier, state)
+    elif state.score > frontier[0].score:
+        heapq.heappop(frontier)
+        heapq.heappush(frontier, state)
 
 def batch_data(data, batch_size):
     data.sort(key=lambda x: len(x[0]))
@@ -352,6 +416,12 @@ def train_model(max_len, batch_size, num_epochs, lr):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = ReduceLROnPlateau(optimizer)
 
+    # optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.98), eps=1e-9)
+    # d_model, warmup = 512, 4000
+    # scheduler = LambdaLR(optimizer,
+    #     lr_lambda=lambda step: d_model ** (-0.5) * min(step ** (-0.5), step * warmup ** (-1.5))
+    # )
+
     best_score = 0.
     for epoch in range(num_epochs):
         random.shuffle(train_data)
@@ -393,7 +463,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
                 src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
                 tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
                 batch = Batch(src, tgt, pad_idx)
-                model_out = greedy_decode(model, batch.src, batch.src_mask)
+                model_out = greedy_search(model, batch.src, batch.src_mask)
                 for i in range(batch_size):
                     reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[i] if x != pad_idx]))
                     candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out[i] if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
@@ -436,7 +506,7 @@ def score_model(max_len, batch_size, pad_idx=2):
             src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
             tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
             batch = Batch(src, tgt, pad_idx)
-            model_out = greedy_decode(model, batch.src, batch.src_mask)
+            model_out = greedy_search(model, batch.src, batch.src_mask)
             for i in range(batch_size):
                 reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[i] if x != pad_idx]))
                 candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out[i] if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
@@ -458,7 +528,7 @@ def translate(text):
             src_vocab.add(line.split()[0])
 
     # model = torch.load('model_de-en.pt', map_location=torch.device('cpu'))
-    model = Model(len(src_vocab), len(tgt_vocab)).to(device)
+    model = Model(len(src_vocab), len(tgt_vocab))
     model.load_state_dict(torch.load('model_de-en.pt'))
     model.eval()
 
@@ -466,12 +536,19 @@ def translate(text):
     src = src_vocab.numberize(*words).unsqueeze(0)
     batch = Batch(src, pad=pad_idx)
 
-    model_out = greedy_decode(model, batch.src, batch.src_mask)[0]
+    with torch.no_grad():
+        model_out = beam_search(model, batch, beam_size=5)[0].squeeze(0)
     translation = detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx])
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
+    # with torch.no_grad():
+    #     model_out = beam_search(model, batch, beam_size=5)
+    #     for out in model_out:
+    #         translation = detokenize([tgt_vocab.denumberize(x) for x in out.squeeze(0) if x != pad_idx])
+    #         print(translation.split('<BOS> ')[1].split('<EOS>')[0])
 
 if __name__ == '__main__':
-    train_model(max_len=256, batch_size=32, num_epochs=10, lr=1e-4)
+    # train_model(max_len=16, batch_size=128, num_epochs=10, lr=1e-4)
+    print(translate('Ich möchte heute das Parlament sehen.'))
     # print(translate('Im Juli, möchte ich nach Europa reisen.'))
     # print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
     # print(translate('Arjun solltet seine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))

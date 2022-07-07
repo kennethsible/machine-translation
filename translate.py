@@ -1,4 +1,4 @@
-import torch, random, copy, math, time, tqdm, re
+import torch, random, heapq, copy, math, time, tqdm, re
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sacremoses import MosesTokenizer, MosesDetokenizer
 from sacrebleu.metrics import BLEU, CHRF
@@ -306,7 +306,28 @@ def greedy_search(model, batch, max_len=64, bos_idx=0, eos_idx=1):
         if max_idx == eos_idx: break
     return tgt
 
-import heapq
+def beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
+    enc = model.encode(batch.src, batch.src_mask).expand(beam_size, -1, -1)
+    score = torch.zeros(beam_size)
+    frontier = torch.full((beam_size, 1), bos_idx).type_as(batch.src)
+    complete = []
+    while len(frontier) > 0 and beam_size > 0:
+        frontier_mask = subsequent_mask(frontier.size(-1)).type_as(batch.src)
+        y = model.decode(enc, batch.src_mask, frontier, frontier_mask)
+        z = model.generator(y[:, -1])
+        hypotheses = torch.add(score.unsqueeze(1), z).flatten()
+        topv, topi = torch.topk(hypotheses, beam_size)
+        score, frontier = topv, torch.stack([torch.cat([
+            frontier[torch.trunc(i / model.tgt_vocab).int()],
+            (i % model.tgt_vocab).unsqueeze(0)
+        ], dim=-1) for i in topi])
+        # TODO max_len
+        finished = (frontier[:, -1] == eos_idx)
+        complete.extend(path for path in frontier[finished])
+        score, frontier = score[~finished], frontier[~finished]
+        if frontier.size(0) < beam_size:
+            beam_size = frontier.size(0)
+    return complete
 
 class BeamState:
 
@@ -338,7 +359,7 @@ class BeamState:
     def __len__(self):
         return self.path.size(-1)
 
-def beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
+def _beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
     enc = model.encode(batch.src, batch.src_mask)
     frontier = [BeamState(0., torch.full((1, 1), bos_idx).long())]
     complete = []
@@ -548,8 +569,8 @@ def translate(text):
 
 if __name__ == '__main__':
     # train_model(max_len=16, batch_size=128, num_epochs=10, lr=1e-4)
-    print(translate('Ich möchte heute das Parlament sehen.'))
-    # print(translate('Im Juli, möchte ich nach Europa reisen.'))
+    # print(translate('Ich möchte heute das Parlament sehen.'))
+    print(translate('Im Juli, möchte ich nach Europa reisen.'))
     # print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
     # print(translate('Arjun solltet seine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
     # score_model(max_len=256, batch_size=32)

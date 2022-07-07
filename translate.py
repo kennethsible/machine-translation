@@ -307,13 +307,12 @@ def greedy_search(model, batch, max_len=64, bos_idx=0, eos_idx=1):
     return tgt
 
 def beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
-    enc = model.encode(batch.src, batch.src_mask).expand(beam_size, -1, -1)
-    score = torch.zeros(beam_size)
-    frontier = torch.full((beam_size, 1), bos_idx).type_as(batch.src)
+    enc = model.encode(batch.src, batch.src_mask)
+    score, frontier = torch.zeros(1), torch.full((1, 1), bos_idx).type_as(batch.src)
     complete = []
     while len(frontier) > 0 and beam_size > 0:
         frontier_mask = subsequent_mask(frontier.size(-1)).type_as(batch.src)
-        y = model.decode(enc, batch.src_mask, frontier, frontier_mask)
+        y = model.decode(enc.expand(frontier.size(0), -1, -1), batch.src_mask, frontier, frontier_mask)
         z = model.generator(y[:, -1])
         hypotheses = torch.add(score.unsqueeze(1), z).flatten()
         topv, topi = torch.topk(hypotheses, beam_size)
@@ -322,14 +321,18 @@ def beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
             (i % model.tgt_vocab).unsqueeze(0)
         ], dim=-1) for i in topi])
         if frontier.size(-1) > max_len:
-            complete.extend(path for path in frontier)
-            return complete
-        finished = (frontier[:, -1] == eos_idx)
-        complete.extend(path for path in frontier[finished])
-        score, frontier = score[~finished], frontier[~finished]
-        if frontier.size(0) < beam_size:
-            beam_size = frontier.size(0)
-    return complete
+            complete.extend(BeamState(score, path) for score, path in zip(score, frontier))
+            beam_size = 0
+        else:
+            finished = (frontier[:, -1] == eos_idx)
+            complete.extend(BeamState(score, path) for score, path in zip(score[finished], frontier[finished]))
+            score, frontier = score[~finished], frontier[~finished]
+            if frontier.size(0) < beam_size:
+                beam_size = frontier.size(0)
+    for state in complete:
+        state.normalize()
+    complete.sort(key=lambda state: -state.score)
+    return [state.path for state in complete]
 
 class BeamState:
 
@@ -338,7 +341,7 @@ class BeamState:
         self.path = path
 
     def normalize(self):
-        self.score /= len(self.path)
+        self.score /= self.path.size(-1)
 
     def __eq__(self, other):
         return self.score == other.score
@@ -358,9 +361,6 @@ class BeamState:
     def __le__(self, other):
         return self.score <= other.score
 
-    def __len__(self):
-        return self.path.size(-1)
-
 def _beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
     enc = model.encode(batch.src, batch.src_mask)
     frontier = [BeamState(0., torch.full((1, 1), bos_idx).long())]
@@ -375,15 +375,16 @@ def _beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
                 successor = BeamState(state.score + z[i].item(),
                     torch.cat([state.path, torch.full((1, 1), i).long()], dim=-1))
                 beam_update(successor, extended_frontier, beam_size)
-        frontier = extended_frontier
-        for state in frontier:
-            if len(state.path) > max_len or state.path.squeeze(0)[-1] == eos_idx:
+        frontier = []
+        for state in extended_frontier:
+            if state.path.size(-1) > max_len or state.path[0, -1] == eos_idx:
                 complete.append(state)
-                frontier.remove(state)
                 beam_size -= 1
+            else:
+                frontier.append(state)
     for state in complete:
         state.normalize()
-    heapq.heapify(complete)
+    complete.sort(key=lambda state: -state.score)
     return [state.path for state in complete]
 
 def beam_update(state, frontier, beam_size):
@@ -498,7 +499,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
             print(output, flush=True)
             outfile.write(output + '\n')
         if bleu_score.score > best_score:
-            torch.save(model.state_dict(), 'model_de-en.pt')
+            torch.save(model.state_dict(), 'model_de-en')
             best_score = bleu_score.score
         print()
 
@@ -517,9 +518,9 @@ def score_model(max_len, batch_size, pad_idx=2):
         for line in vocab_file.readlines():
             src_vocab.add(line.split()[0])
 
-    # model = torch.load('model_de-en.pt').to(device)
+    # model = torch.load('model_de-en').to(device)
     model = Model(len(src_vocab), len(tgt_vocab)).to(device)
-    model.load_state_dict(torch.load('model_de-en.pt'))
+    model.load_state_dict(torch.load('model_de-en'))
     model.eval()
 
     candidate, reference = [], []
@@ -550,9 +551,9 @@ def translate(text):
         for line in vocab_file.readlines():
             src_vocab.add(line.split()[0])
 
-    # model = torch.load('model_de-en.pt', map_location=torch.device('cpu'))
+    # model = torch.load('model_de-en', map_location=torch.device('cpu'))
     model = Model(len(src_vocab), len(tgt_vocab))
-    model.load_state_dict(torch.load('model_de-en.pt'))
+    model.load_state_dict(torch.load('model_de-en'))
     model.eval()
 
     pad_idx = src_vocab.padding_idx
@@ -560,14 +561,9 @@ def translate(text):
     batch = Batch(src, pad=pad_idx)
 
     with torch.no_grad():
-        model_out = beam_search(model, batch, beam_size=5)[0].squeeze(0)
+        model_out = beam_search(model, batch)[0].squeeze(0) # TODO CUDA
     translation = detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx])
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
-    # with torch.no_grad():
-    #     model_out = beam_search(model, batch, beam_size=5)
-    #     for out in model_out:
-    #         translation = detokenize([tgt_vocab.denumberize(x) for x in out.squeeze(0) if x != pad_idx])
-    #         print(translation.split('<BOS> ')[1].split('<EOS>')[0])
 
 if __name__ == '__main__':
     # train_model(max_len=16, batch_size=128, num_epochs=10, lr=1e-4)

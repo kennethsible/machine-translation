@@ -296,43 +296,15 @@ def train_epoch(data, model, src_vocab, tgt_vocab, loss_compute, optimizer=None,
 
 def greedy_search(model, batch, max_len=64, bos_idx=0, eos_idx=1):
     enc = model.encode(batch.src, batch.src_mask)
-    tgt = torch.full((1, 1), bos_idx).type_as(batch.src)
+    tgt = torch.full((1, 1), bos_idx)
     for _ in range(max_len - 1):
-        tgt_mask = subsequent_mask(tgt.size(-1)).type_as(batch.src)
+        tgt_mask = subsequent_mask(tgt.size(-1))
         y = model.decode(enc, batch.src_mask, tgt, tgt_mask)
         z = model.generator(y[:, -1])
         max_idx = torch.argmax(z, dim=-1)
         tgt = torch.cat([tgt, max_idx.unsqueeze(0)], dim=-1)
         if max_idx == eos_idx: break
     return tgt
-
-def beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
-    enc = model.encode(batch.src, batch.src_mask)
-    score, frontier = torch.zeros(1), torch.full((1, 1), bos_idx).type_as(batch.src)
-    complete = []
-    while len(frontier) > 0 and beam_size > 0:
-        frontier_mask = subsequent_mask(frontier.size(-1)).type_as(batch.src)
-        y = model.decode(enc.expand(frontier.size(0), -1, -1), batch.src_mask, frontier, frontier_mask)
-        z = model.generator(y[:, -1])
-        hypotheses = torch.add(score.unsqueeze(1), z).flatten()
-        topv, topi = torch.topk(hypotheses, beam_size)
-        score, frontier = topv, torch.stack([torch.cat([
-            frontier[torch.trunc(i / model.tgt_vocab).int()],
-            (i % model.tgt_vocab).unsqueeze(0)
-        ], dim=-1) for i in topi])
-        if frontier.size(-1) > max_len:
-            complete.extend(BeamState(score, path) for score, path in zip(score, frontier))
-            beam_size = 0
-        else:
-            finished = (frontier[:, -1] == eos_idx)
-            complete.extend(BeamState(score, path) for score, path in zip(score[finished], frontier[finished]))
-            score, frontier = score[~finished], frontier[~finished]
-            if frontier.size(0) < beam_size:
-                beam_size = frontier.size(0)
-    for state in complete:
-        state.normalize()
-    complete.sort(key=lambda state: -state.score)
-    return [state.path for state in complete]
 
 class BeamState:
 
@@ -361,19 +333,43 @@ class BeamState:
     def __le__(self, other):
         return self.score <= other.score
 
+def beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
+    enc = model.encode(batch.src, batch.src_mask)
+    scores, paths = torch.zeros(1), torch.full((1, 1), bos_idx)
+    complete = []
+    while len(paths) > 0 and beam_size > 0:
+        paths_mask = subsequent_mask(paths.size(-1))
+        y = model.decode(enc.expand(paths.size(0), -1, -1), batch.src_mask, paths, paths_mask)
+        z = model.generator(y[:, -1])
+        hypotheses = torch.add(scores.unsqueeze(1), z).flatten()
+        topv, topi = torch.topk(hypotheses, beam_size)
+        scores, paths = topv, torch.stack([torch.cat([
+            paths[torch.trunc(i / model.tgt_vocab).int()],
+            (i % model.tgt_vocab).unsqueeze(0)
+        ], dim=-1) for i in topi])
+        finished = torch.full((beam_size,), True) if paths.size(-1) > max_len else paths[:, -1] == eos_idx
+        complete.extend(BeamState(score, path) for score, path in zip(scores[finished], paths[finished]))
+        scores, paths = scores[~finished], paths[~finished]
+        if paths.size(0) < beam_size:
+            beam_size = paths.size(0)
+    for state in complete:
+        state.normalize()
+    complete.sort(key=lambda state: -state.score)
+    return [state.path for state in complete]
+
 def _beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
     enc = model.encode(batch.src, batch.src_mask)
-    frontier = [BeamState(0., torch.full((1, 1), bos_idx).long())]
+    frontier = [BeamState(0., torch.full((1, 1), bos_idx))]
     complete = []
     while len(frontier) > 0 and beam_size > 0:
         extended_frontier = []
         for state in frontier:
-            path_mask = subsequent_mask(state.path.size(-1)).long()
+            path_mask = subsequent_mask(state.path.size(-1))
             y = model.decode(enc, batch.src_mask, state.path, path_mask)
             z = model.generator(y[:, -1]).squeeze(0)
             for i in range(model.tgt_vocab):
                 successor = BeamState(state.score + z[i].item(),
-                    torch.cat([state.path, torch.full((1, 1), i).long()], dim=-1))
+                    torch.cat([state.path, torch.full((1, 1), i)], dim=-1))
                 beam_update(successor, extended_frontier, beam_size)
         frontier = []
         for state in extended_frontier:
@@ -560,15 +556,15 @@ def translate(text):
     src = src_vocab.numberize(*words).unsqueeze(0)
     batch = Batch(src, pad=pad_idx)
 
-    with torch.no_grad():
-        model_out = beam_search(model, batch)[0].squeeze(0) # TODO CUDA
+    with torch.no_grad(): # TODO CUDA DEVICE
+        model_out = beam_search(model, batch, beam_size=5)[0].squeeze(0)
     translation = detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx])
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
 
 if __name__ == '__main__':
-    # train_model(max_len=16, batch_size=128, num_epochs=10, lr=1e-4)
+    train_model(max_len=16, batch_size=128, num_epochs=10, lr=1e-4)
     # print(translate('Ich möchte heute das Parlament sehen.'))
-    print(translate('Im Juli, möchte ich nach Europa reisen.'))
+    # print(translate('Im Juli, möchte ich nach Europa reisen.'))
     # print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
     # print(translate('Arjun solltet seine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
     # score_model(max_len=256, batch_size=32)

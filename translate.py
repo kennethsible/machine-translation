@@ -321,7 +321,9 @@ def beam_search(model, batch, beam_size=5, max_len=64, bos_idx=0, eos_idx=1):
             frontier[torch.trunc(i / model.tgt_vocab).int()],
             (i % model.tgt_vocab).unsqueeze(0)
         ], dim=-1) for i in topi])
-        # TODO max_len
+        if frontier.size(-1) > max_len:
+            complete.extend(path for path in frontier)
+            return complete
         finished = (frontier[:, -1] == eos_idx)
         complete.extend(path for path in frontier[finished])
         score, frontier = score[~finished], frontier[~finished]

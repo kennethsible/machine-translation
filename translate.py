@@ -336,66 +336,6 @@ def beam_search(model, batch, beam_size=5, max_len=64, start_token=0, end_token=
     complete.sort(key=lambda state: -state[0])
     return [path for _, path in complete]
 
-class BeamState:
-
-    def __init__(self, score, path):
-        self.score = score
-        self.path = path
-
-    def normalize(self):
-        self.score /= self.path.size(-1)
-
-    def __eq__(self, other):
-        return self.score == other.score
-
-    def __ne__(self, other):
-        return self.score != other.score
-
-    def __gt__(self, other):
-        return self.score > other.score
-
-    def __ge__(self, other):
-        return self.score >= other.score
-
-    def __lt__(self, other):
-        return self.score < other.score
-
-    def __le__(self, other):
-        return self.score <= other.score
-
-def _beam_search(model, batch, beam_size=5, max_len=64, start_token=0, end_token=1):
-    enc = model.encode(batch.src, batch.src_mask)
-    frontier = [BeamState(0., torch.full((1, 1), start_token))]
-    complete = []
-    while len(frontier) > 0 and beam_size > 0:
-        extended_frontier = []
-        for state in frontier:
-            path_mask = subsequent_mask(state.path.size(-1))
-            y = model.decode(enc, batch.src_mask, state.path, path_mask)
-            z = model.generator(y[:, -1]).squeeze(0)
-            for i in range(model.tgt_vocab):
-                successor = BeamState(state.score + z[i].item(),
-                    torch.cat([state.path, torch.full((1, 1), i)], dim=-1))
-                beam_update(successor, extended_frontier, beam_size)
-        frontier = []
-        for state in extended_frontier:
-            if state.path.size(-1) > max_len or state.path[0, -1] == end_token:
-                complete.append(state)
-                beam_size -= 1
-            else:
-                frontier.append(state)
-    for state in complete:
-        state.normalize()
-    complete.sort(key=lambda state: -state.score)
-    return [state.path for state in complete]
-
-def beam_update(state, frontier, beam_size):
-    if len(frontier) < beam_size:
-        heapq.heappush(frontier, state)
-    elif state.score > frontier[0].score:
-        heapq.heappop(frontier)
-        heapq.heappush(frontier, state)
-
 def batch_data(data, batch_size):
     data.sort(key=lambda x: len(x[0]))
     batched = []

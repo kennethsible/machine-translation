@@ -294,7 +294,7 @@ def train_epoch(data, model, src_vocab, tgt_vocab, loss_compute, optimizer=None,
         del loss
     return total_loss / total_tokens
 
-def greedy_search(model, batch, max_len=64, start_token=0, end_token=1):
+def greedy_search(model, batch, max_len=256, start_token=0, end_token=1):
     enc = model.encode(batch.src, batch.src_mask)
     tgt = torch.full((1, 1), start_token)
     for _ in range(max_len):
@@ -306,11 +306,10 @@ def greedy_search(model, batch, max_len=64, start_token=0, end_token=1):
         if next_token == end_token: break
     return tgt
 
-def beam_search(model, batch, beam_size=5, max_len=64, start_token=0, end_token=1, pad_token=2):
+def beam_search(model, batch, beam_size=5, max_len=256, start_token=0, end_token=1):
     enc = model.encode(batch.src, batch.src_mask)
     scores = torch.zeros(1, device=device)
-    paths = torch.full((1, max_len + 1), pad_token, device=device)
-    paths[:, 0] = start_token
+    paths = torch.full((1, max_len + 1), start_token, device=device)
 
     complete = []
     for i in range(1, max_len + 1):
@@ -325,7 +324,7 @@ def beam_search(model, batch, beam_size=5, max_len=64, start_token=0, end_token=
         paths[:, i] = torch.remainder(topi, model.tgt_vocab)
 
         finished = paths[:, i] == end_token
-        complete.extend(zip(scores[finished], paths[finished]))
+        complete.extend(zip(scores[finished], paths[finished, :i]))
         scores, paths = scores[~finished], paths[~finished]
         if paths.size(0) < beam_size:
             beam_size = paths.size(0)
@@ -431,7 +430,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
                 src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
                 tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
                 batch = Batch(src, tgt, pad_idx)
-                model_out = beam_search(model, batch.src, batch.src_mask, beam_size=5, device=device)
+                model_out = beam_search(model, batch, beam_size=5)
                 for i in range(batch_size):
                     reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[i] if x != pad_idx]))
                     candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out[i] if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
@@ -473,7 +472,7 @@ def score_model(max_len, batch_size, pad_idx=2):
             src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
             tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
             batch = Batch(src, tgt, pad_idx)
-            model_out = beam_search(model, batch.src, batch.src_mask, beam_size=5, device=device)
+            model_out = beam_search(model, batch, beam_size=5)
             for i in range(batch_size):
                 reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[i] if x != pad_idx]))
                 candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out[i] if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')

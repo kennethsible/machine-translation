@@ -306,14 +306,15 @@ def greedy_search(model, batch, max_len=64, start_token=0, end_token=1):
         if next_token == end_token: break
     return tgt
 
-def beam_search(model, batch, beam_size=5, max_len=64, start_token=0, end_token=1):
+def beam_search(model, batch, beam_size=5, max_len=64, start_token=0, end_token=1, device='cpu'):
     enc = model.encode(batch.src, batch.src_mask)
-    scores, paths = torch.zeros(1), torch.full((1, 1), start_token)
+    scores = torch.zeros(1, device=device)
+    paths = torch.full((1, 1), start_token, device=device)
 
     complete = []
     while len(paths) > 0 and beam_size > 0:
         enc_expand = enc.expand(paths.size(0), -1, -1)
-        paths_mask = subsequent_mask(paths.size(-1))
+        paths_mask = subsequent_mask(paths.size(-1)).to(device)
         y = model.decode(enc_expand, batch.src_mask, paths, paths_mask)
         z = model.generator(y[:, -1])
 
@@ -324,12 +325,15 @@ def beam_search(model, batch, beam_size=5, max_len=64, start_token=0, end_token=
             torch.remainder(topi, model.tgt_vocab).unsqueeze(-1)
         ), dim=-1)
 
-        finished = paths[:, -1] == end_token | \
-            torch.full((beam_size,), paths.size(-1) > max_len)
-        complete.extend(zip(scores[finished], paths[finished]))
-        scores, paths = scores[~finished], paths[~finished]
-        if paths.size(0) < beam_size:
-            beam_size = paths.size(0)
+        if paths.size(-1) < max_len:
+            finished = paths[:, -1] == end_token
+            complete.extend(zip(scores[finished], paths[finished]))
+            scores, paths = scores[~finished], paths[~finished]
+            if paths.size(0) < beam_size:
+                beam_size = paths.size(0)
+        else:
+            complete.extend(zip(scores, paths))
+            beam_size = 0
 
     for score, path in complete:
         score /= path.size(-1)
@@ -429,7 +433,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
                 src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
                 tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
                 batch = Batch(src, tgt, pad_idx)
-                model_out = greedy_search(model, batch.src, batch.src_mask)
+                model_out = beam_search(model, batch.src, batch.src_mask, beam_size=5, device=device)
                 for i in range(batch_size):
                     reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[i] if x != pad_idx]))
                     candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out[i] if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
@@ -441,7 +445,7 @@ def train_model(max_len, batch_size, num_epochs, lr):
             print(output, flush=True)
             outfile.write(output + '\n')
         if bleu_score.score > best_score:
-            torch.save(model.state_dict(), 'model_de-en')
+            torch.save(model.state_dict(), 'model')
             best_score = bleu_score.score
         print()
 
@@ -460,9 +464,8 @@ def score_model(max_len, batch_size, pad_idx=2):
         for line in vocab_file.readlines():
             src_vocab.add(line.split()[0])
 
-    # model = torch.load('model_de-en').to(device)
     model = Model(len(src_vocab), len(tgt_vocab)).to(device)
-    model.load_state_dict(torch.load('model_de-en'))
+    model.load_state_dict(torch.load('model'))
     model.eval()
 
     candidate, reference = [], []
@@ -472,7 +475,7 @@ def score_model(max_len, batch_size, pad_idx=2):
             src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
             tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
             batch = Batch(src, tgt, pad_idx)
-            model_out = greedy_search(model, batch.src, batch.src_mask)
+            model_out = beam_search(model, batch.src, batch.src_mask, beam_size=5, device=device)
             for i in range(batch_size):
                 reference.append(detokenize([tgt_vocab.denumberize(x) for x in batch.tgt[i] if x != pad_idx]))
                 candidate.append(detokenize([tgt_vocab.denumberize(x) for x in model_out[i] if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
@@ -484,7 +487,7 @@ def score_model(max_len, batch_size, pad_idx=2):
         for words in candidate:
             outfile.write(words.split('<BOS> ')[1].split('<EOS>')[0] + '\n')
 
-def translate(text):
+def translate(text, ):
     text = bpe.process_line(mt.tokenize(text, return_str=True))
     words = ['<BOS>'] + text.split() + ['<EOS>']
 
@@ -493,24 +496,22 @@ def translate(text):
         for line in vocab_file.readlines():
             src_vocab.add(line.split()[0])
 
-    # model = torch.load('model_de-en', map_location=torch.device('cpu'))
     model = Model(len(src_vocab), len(tgt_vocab))
-    model.load_state_dict(torch.load('model_de-en'))
+    model.load_state_dict(torch.load('model'))
     model.eval()
 
     pad_idx = src_vocab.padding_idx
     src = src_vocab.numberize(*words).unsqueeze(0)
     batch = Batch(src, pad=pad_idx)
 
-    with torch.no_grad(): # TODO CUDA DEVICE
+    with torch.no_grad():
         model_out = beam_search(model, batch, beam_size=5)[0].squeeze(0)
     translation = detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx])
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
 
 if __name__ == '__main__':
-    # train_model(max_len=16, batch_size=128, num_epochs=10, lr=1e-4)
-    # print(translate('Ich möchte heute das Parlament sehen.'))
-    print(translate('Im Juli, möchte ich nach Europa reisen.'))
+    train_model(max_len=128, batch_size=32, num_epochs=10, lr=1e-4)
+    # print(translate('Im Juli, möchte ich nach Europa reisen.'))
     # print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
     # print(translate('Arjun solltet seine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
-    # score_model(max_len=256, batch_size=32)
+    # score_model(max_len=128, batch_size=32)

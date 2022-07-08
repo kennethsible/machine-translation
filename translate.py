@@ -297,7 +297,7 @@ def train_epoch(data, model, src_vocab, tgt_vocab, loss_compute, optimizer=None,
 def greedy_search(model, batch, max_len=64, start_token=0, end_token=1):
     enc = model.encode(batch.src, batch.src_mask)
     tgt = torch.full((1, 1), start_token)
-    for _ in range(max_len - 1):
+    for _ in range(max_len):
         tgt_mask = subsequent_mask(tgt.size(-1))
         y = model.decode(enc, batch.src_mask, tgt, tgt_mask)
         z = model.generator(y[:, -1])
@@ -306,35 +306,33 @@ def greedy_search(model, batch, max_len=64, start_token=0, end_token=1):
         if next_token == end_token: break
     return tgt
 
-def beam_search(model, batch, beam_size=5, max_len=64, start_token=0, end_token=1, device='cpu'):
+def beam_search(model, batch, beam_size=5, max_len=64, start_token=0, end_token=1, pad_token=2):
     enc = model.encode(batch.src, batch.src_mask)
     scores = torch.zeros(1, device=device)
-    paths = torch.full((1, 1), start_token, device=device)
+    paths = torch.full((1, max_len + 1), pad_token, device=device)
+    paths[:, 0] = start_token
 
     complete = []
-    while len(paths) > 0 and beam_size > 0:
+    for i in range(1, max_len + 1):
         enc_expand = enc.expand(paths.size(0), -1, -1)
-        paths_mask = subsequent_mask(paths.size(-1)).to(device)
-        y = model.decode(enc_expand, batch.src_mask, paths, paths_mask)
+        paths_mask = subsequent_mask(i).to(device)
+        y = model.decode(enc_expand, batch.src_mask, paths[:, :i], paths_mask)
         z = model.generator(y[:, -1])
 
         hypotheses = torch.add(scores.unsqueeze(1), z).flatten()
         topv, topi = torch.topk(hypotheses, beam_size)
-        scores, paths = topv, torch.cat((
-            paths[torch.trunc(topi / model.tgt_vocab).long()],
-            torch.remainder(topi, model.tgt_vocab).unsqueeze(-1)
-        ), dim=-1)
+        scores, paths = topv, paths[torch.trunc(topi / model.tgt_vocab).long()]
+        paths[:, i] = torch.remainder(topi, model.tgt_vocab)
 
-        if paths.size(-1) < max_len:
-            finished = paths[:, -1] == end_token
-            complete.extend(zip(scores[finished], paths[finished]))
-            scores, paths = scores[~finished], paths[~finished]
-            if paths.size(0) < beam_size:
-                beam_size = paths.size(0)
-        else:
-            complete.extend(zip(scores, paths))
-            beam_size = 0
+        finished = paths[:, i] == end_token
+        complete.extend(zip(scores[finished], paths[finished]))
+        scores, paths = scores[~finished], paths[~finished]
+        if paths.size(0) < beam_size:
+            beam_size = paths.size(0)
+        if beam_size == 0: break
 
+    if paths.size(0) > 0:
+        complete.extend(zip(scores, paths))
     for score, path in complete:
         score /= path.size(-1)
     complete.sort(key=lambda state: -state[0])
@@ -487,9 +485,9 @@ def score_model(max_len, batch_size, pad_idx=2):
         for words in candidate:
             outfile.write(words.split('<BOS> ')[1].split('<EOS>')[0] + '\n')
 
-def translate(text, ):
-    text = bpe.process_line(mt.tokenize(text, return_str=True))
-    words = ['<BOS>'] + text.split() + ['<EOS>']
+def translate(input):
+    input = bpe.process_line(mt.tokenize(input, return_str=True))
+    words = ['<BOS>'] + input.split() + ['<EOS>']
 
     src_vocab = tgt_vocab = Vocab()
     with open('data/vocab.bpe') as vocab_file:
@@ -497,15 +495,15 @@ def translate(text, ):
             src_vocab.add(line.split()[0])
 
     model = Model(len(src_vocab), len(tgt_vocab))
-    model.load_state_dict(torch.load('model'))
+    model.load_state_dict(torch.load('model', map_location=device))
     model.eval()
 
-    pad_idx = src_vocab.padding_idx
-    src = src_vocab.numberize(*words).unsqueeze(0)
-    batch = Batch(src, pad=pad_idx)
-
     with torch.no_grad():
+        pad_idx = src_vocab.padding_idx
+        src = src_vocab.numberize(*words).unsqueeze(0)
+        batch = Batch(src, pad=pad_idx)
         model_out = beam_search(model, batch, beam_size=5)[0].squeeze(0)
+
     translation = detokenize([tgt_vocab.denumberize(x) for x in model_out if x != pad_idx])
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
 

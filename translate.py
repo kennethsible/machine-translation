@@ -354,7 +354,7 @@ def batch_data(data, batch_size):
         batched.append(batch)
     return batched
 
-def train_model(train_file, max_len, batch_size, num_epochs, lr):
+def train_model(train_file, max_len, batch_size):
     train_data = []
     for line in open(train_file):
         src_line, tgt_line = line.split('\t')
@@ -380,11 +380,11 @@ def train_model(train_file, max_len, batch_size, num_epochs, lr):
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     scheduler = ReduceLROnPlateau(optimizer)
 
     best_score = 0.
-    for epoch in range(num_epochs):
+    for epoch in range(10):
         random.shuffle(train_data)
     
         start = time.time()
@@ -413,10 +413,11 @@ def train_model(train_file, max_len, batch_size, num_epochs, lr):
         scheduler.step(valid_loss)
         lr = optimizer.param_groups[0]['lr']
         with open('DEBUG.log', 'a') as outfile:
-            output = f'[{epoch + 1}] Train Loss: {train_loss} | Valid Loss: {valid_loss} | Learning Rate: {lr} | Elapsed Time: {elapsed}'
+            output = f'[{epoch + 1}] Train Loss: {train_loss} | Valid Loss: {valid_loss} | Learning Rate: {lr}'
             print(output, flush=True)
-            outfile.write(output + '\n')
+            outfile.write(output + f' | Train Time: {elapsed}\n')
 
+        start = time.time()
         candidate, reference = [], []
         with torch.no_grad():
             for batch in valid_data:
@@ -429,19 +430,20 @@ def train_model(train_file, max_len, batch_size, num_epochs, lr):
                         for x in batch.tgt[0] if x != pad_idx]))
                     candidate.append(detokenize([tgt_vocab.denumberize(x)
                         for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
-
         bleu_score = bleu.corpus_score(candidate, [reference])
         chrf_score = chrf.corpus_score(candidate, [reference])
+        elapsed = timedelta(seconds=(time.time() - start))
+
         with open('DEBUG.log', 'a') as outfile:
-            output = f'{chrf_score} ; {bleu_score}\n'
+            output = f'  {chrf_score} | {bleu_score}'
             print(output, flush=True)
-            outfile.write(output + '\n')
+            outfile.write(output + f' | Decode Time: {elapsed}\n')
         if bleu_score.score > best_score:
             torch.save(model.state_dict(), 'model')
             best_score = bleu_score.score
         print()
 
-def score_model(test_file, max_len, batch_size):
+def score_model(test_file, max_len):
     test_data = []
     for line in open(test_file):
         src_line, tgt_line = line.split('\t')
@@ -449,7 +451,6 @@ def score_model(test_file, max_len, batch_size):
         tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
         if len(src_words) <= max_len and len(tgt_words) <= max_len:
             test_data.append((src_words, tgt_words))
-    test_data = batch_data(test_data, batch_size)
 
     src_vocab = tgt_vocab = Vocab()
     with open('data/vocab.bpe') as vocab_file:
@@ -461,25 +462,26 @@ def score_model(test_file, max_len, batch_size):
     model.load_state_dict(torch.load('model', map_location=device))
     model.eval()
 
+    start = time.time()
     candidate, reference = [], []
     with torch.no_grad():
-        for batch in tqdm.tqdm(test_data):
-            for src_words, tgt_words in batch:
-                src = src_vocab.numberize(*src_words).to(device)
-                tgt = tgt_vocab.numberize(*tgt_words).to(device)
-                batch = Batch(src.unsqueeze(0), tgt.unsqueeze(0), pad_idx)
-                model_out = beam_search(model, batch, beam_size=5)[0]
-                reference.append(detokenize([tgt_vocab.denumberize(x)
-                    for x in batch.tgt[0] if x != pad_idx]))
-                candidate.append(detokenize([tgt_vocab.denumberize(x)
-                    for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
-
+        for src_words, tgt_words in tqdm.tqdm(test_data):
+            src = src_vocab.numberize(*src_words).to(device)
+            tgt = tgt_vocab.numberize(*tgt_words).to(device)
+            batch = Batch(src.unsqueeze(0), tgt.unsqueeze(0), pad_idx)
+            model_out = beam_search(model, batch, beam_size=5)[0]
+            reference.append(detokenize([tgt_vocab.denumberize(x)
+                for x in batch.tgt[0] if x != pad_idx]))
+            candidate.append(detokenize([tgt_vocab.denumberize(x)
+                for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
     bleu_score = bleu.corpus_score(candidate, [reference])
     chrf_score = chrf.corpus_score(candidate, [reference])
+    elapsed = timedelta(seconds=(time.time() - start))
+
     with open('DEBUG.log', 'w') as outfile:
-        output = f'{chrf_score} ; {bleu_score}\n'
+        output = f'{chrf_score} | {bleu_score}'
         print(output, flush=True)
-        outfile.write(output)
+        outfile.write(output + f' | Decode Time: {elapsed}')
     with open('data/test.out', 'w') as outfile:
         for words in candidate:
             outfile.write(words.split('<BOS> ')[1].split('<EOS>')[0] + '\n')
@@ -494,12 +496,12 @@ def translate(input):
             src_vocab.add(line.split()[0])
     pad_idx = src_vocab.padding_idx
 
-    model = Model(len(src_vocab), len(tgt_vocab))
+    model = Model(len(src_vocab), len(tgt_vocab)).to(device)
     model.load_state_dict(torch.load('model', map_location=device))
     model.eval()
 
     with torch.no_grad():
-        src = src_vocab.numberize(*words)
+        src = src_vocab.numberize(*words).to(device)
         batch = Batch(src.unsqueeze(0), pad=pad_idx)
         model_out = beam_search(model, batch, beam_size=5)[0]
 
@@ -508,8 +510,16 @@ def translate(input):
     return translation.split('<BOS> ')[1].split('<EOS>')[0]
 
 if __name__ == '__main__':
-    train_model('data/train.tok.bpe.de-en', max_len=128, batch_size=32, num_epochs=10, lr=1e-4)
-    # print(translate('Im Juli, möchte ich nach Europa reisen.'))
-    # print(translate('Ich sollte meine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
-    # print(translate('Arjun solltet seine Hausaufgaben machen, bevor wir heute Abend trinken gehen.'))
-    # score_model('data/test.tok.bpe.de-en', max_len=128, batch_size=32)
+    import argparse
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--train', metavar='FILE', help='train model')
+    group.add_argument('--score', metavar='FILE', help='score model')
+    group.add_argument('input', nargs='?', type=str, help='input string for translation')
+    args = parser.parse_args()
+    if args.train:
+        train_model(args.train, max_len=128, batch_size=32)
+    elif args.score:
+        score_model(args.score, max_len=128)
+    elif args.input:
+        print(translate(args.input))

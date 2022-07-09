@@ -5,4 +5,5 @@ data/dev.*
 data/test.*
 data/vocab.*
 data/bpe.out
+model_*
 DEBUG.log

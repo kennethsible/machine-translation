@@ -8,10 +8,11 @@ from torch import nn
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-bleu, chrf, bpe = BLEU(), CHRF(), BPE(open('data/bpe.out'))
-mt, md = MosesTokenizer(lang='de'), MosesDetokenizer(lang='en')
+src_lang, tgt_lang = '', ''
+bleu, chrf = BLEU(), CHRF()
 
 def detokenize(input):
+    md = MosesDetokenizer(lang=tgt_lang)
     return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(input))
 
 def clone(module, N):
@@ -439,7 +440,7 @@ def train_model(train_file, max_len, batch_size):
             print(output, flush=True)
             outfile.write(output + f' | Decode Time: {elapsed}\n')
         if bleu_score.score > best_score:
-            torch.save(model.state_dict(), 'model')
+            torch.save(model.state_dict(), f'model_{src_lang}-{tgt_lang}')
             best_score = bleu_score.score
         print()
 
@@ -459,7 +460,7 @@ def score_model(test_file, max_len):
     pad_idx = src_vocab.padding_idx
 
     model = Model(len(src_vocab), len(tgt_vocab)).to(device)
-    model.load_state_dict(torch.load('model', map_location=device))
+    model.load_state_dict(torch.load(f'model_{src_lang}-{tgt_lang}', map_location=device))
     model.eval()
 
     start = time.time()
@@ -487,6 +488,7 @@ def score_model(test_file, max_len):
             outfile.write(words.split('<BOS> ')[1].split('<EOS>')[0] + '\n')
 
 def translate(input):
+    mt, bpe = MosesTokenizer(lang=src_lang), BPE(open('data/bpe.out'))
     input = bpe.process_line(mt.tokenize(input, return_str=True))
     words = ['<BOS>'] + input.split() + ['<EOS>']
 
@@ -497,7 +499,7 @@ def translate(input):
     pad_idx = src_vocab.padding_idx
 
     model = Model(len(src_vocab), len(tgt_vocab)).to(device)
-    model.load_state_dict(torch.load('model', map_location=device))
+    model.load_state_dict(torch.load(f'model_{src_lang}-{tgt_lang}', map_location=device))
     model.eval()
 
     with torch.no_grad():
@@ -512,11 +514,17 @@ def translate(input):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group()
+    group = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument('src_lang', type=str, help='source language')
+    parser.add_argument('tgt_lang', type=str, help='target language')
     group.add_argument('--train', metavar='FILE', help='train model')
     group.add_argument('--score', metavar='FILE', help='score model')
     group.add_argument('input', nargs='?', type=str, help='input string for translation')
     args = parser.parse_args()
+
+    src_lang = args.src_lang
+    tgt_lang = args.tgt_lang
+
     if args.train:
         train_model(args.train, max_len=128, batch_size=32)
     elif args.score:

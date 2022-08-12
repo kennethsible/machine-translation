@@ -1,9 +1,5 @@
 __pycache__/
 *.pyc
-data/train.*
-data/dev.*
-data/test.*
-data/vocab.*
-data/bpe.out
-model_*
+data/
+model.*
 DEBUG.log

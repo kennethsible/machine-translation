@@ -1,5 +1,4 @@
 import torch, random, copy, math, time, tqdm, re
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sacremoses import MosesTokenizer, MosesDetokenizer
 from sacrebleu.metrics import BLEU, CHRF
 from subword_nmt.apply_bpe import BPE
@@ -11,128 +10,143 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 src_lang, tgt_lang = '', ''
 bleu, chrf = BLEU(), CHRF()
 
-def detokenize(input):
+def tokenize(input):
+    mt = MosesTokenizer(lang=src_lang)
+    return mt.tokenize(input, return_str=True)
+
+def detokenize(output):
     md = MosesDetokenizer(lang=tgt_lang)
-    return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(input))
+    return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(output))
 
 def clone(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
+class Linear(nn.Module):
+
+    def __init__(self, d_inp, d_out):
+        super(Linear, self).__init__()
+        self.weight = torch.nn.Parameter(torch.empty(d_out, d_inp))
+        self.bias = torch.nn.Parameter(torch.empty(d_out))
+        torch.nn.init.normal_(self.weight, std=0.01)
+        torch.nn.init.normal_(self.bias, std=0.01)
+
+    def forward(self, x):
+        return x @ torch.transpose(self.weight, 0, 1) + self.bias
+
+class LogSoftmax(nn.Module):
+
+    def __init__(self, d_model, vocab):
+        super(LogSoftmax, self).__init__()
+        self.weight = torch.nn.Parameter(torch.empty(d_model, vocab))
+        torch.nn.init.normal_(self.weight, std=0.01)
+
+    def forward(self, x, ignore_index=None):
+        # https://aclanthology.org/N18-1031
+        weight = nn.functional.normalize(self.weight, dim=-1)
+        y = x @ torch.transpose(weight, 0, 1)
+        if ignore_index is not None:
+            y[..., ignore_index] = -torch.inf
+        return torch.log_softmax(y, dim=-1).nan_to_num(neginf=0.)
+
 class Embedding(nn.Module):
 
     def __init__(self, d_model, vocab):
-        super().__init__()
-        self.emb = nn.Embedding(vocab, d_model)
-        self.d_model = d_model
+        super(Embedding, self).__init__()
+        self.weight = torch.nn.Parameter(torch.empty(vocab, d_model))
+        torch.nn.init.normal_(self.weight, std=0.01)
 
     def forward(self, x):
-        return self.emb(x) * math.sqrt(self.d_model)
+        # https://aclanthology.org/N18-1031
+        return nn.functional.normalize(self.weight[x], dim=-1)
 
 class PositionalEncoding(nn.Module):
 
     def __init__(self, d_model, dropout, max_len=5000):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(dropout)
 
-        penc = torch.zeros(max_len, d_model)
+        enc = torch.zeros(max_len, d_model, requires_grad=False)
         position = torch.arange(0, max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000) / d_model))
-        penc[:, 0::2] = torch.sin(position * div_term)
-        penc[:, 1::2] = torch.cos(position * div_term)
-        penc = penc.unsqueeze(0).requires_grad_(False)
-        self.register_buffer('penc', penc)
+        enc[:, 0::2] = torch.sin(position * div_term)
+        enc[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('enc', enc.unsqueeze(0))
 
     def forward(self, x):
-        x = x + self.penc[:, : x.size(1)]
+        x = x + self.enc[:, : x.size(1)]
         return self.dropout(x)
 
 class FeedForward(nn.Module):
 
     def __init__(self, d_model, d_ff, dropout=0.1):
-        super().__init__()
-        self.w_1 = nn.Linear(d_model, d_ff)
-        self.w_2 = nn.Linear(d_ff, d_model)
+        super(FeedForward, self).__init__()
+        self.ff_1 = Linear(d_model, d_ff)
+        self.ff_2 = Linear(d_ff, d_model)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.w_2(self.dropout(self.w_1(x).relu()))
+        return self.ff_2(self.dropout(self.ff_1(x).relu()))
 
 class LayerNorm(nn.Module):
 
-    def __init__(self, features, eps=1e-6):
-        super().__init__()
-        self.a_2 = nn.Parameter(torch.ones(features))
-        self.b_2 = nn.Parameter(torch.zeros(features))
+    def __init__(self, size, eps=1e-5):
+        super(LayerNorm, self).__init__()
+        self.gamma = nn.Parameter(torch.ones(size))
+        self.beta = nn.Parameter(torch.zeros(size))
         self.eps = eps
 
     def forward(self, x):
-        mean = torch.mean(x, -1, keepdim=True)
-        std = torch.std(x, -1, keepdim=True)
-        return self.a_2 * (x - mean) / (std + self.eps) + self.b_2
+        mean, var = torch.mean(x, dim=-1, keepdim=True), torch.var(x, dim=-1, keepdim=True)
+        return self.gamma * (x - mean) / torch.sqrt(var + self.eps) + self.beta
 
-class LogSoftmax(nn.Module):
+class ScaleNorm(nn.Module):
+    # https://aclanthology.org/2019.iwslt-1.17
 
-    def __init__(self, d_model, vocab):
-        super().__init__()
-        self.proj = nn.Linear(d_model, vocab)
+    def __init__(self, scale, eps=1e-5):
+        super(ScaleNorm, self).__init__()
+        self.scale = nn.Parameter(scale)
+        self.eps = eps
 
     def forward(self, x):
-        return torch.log_softmax(self.proj(x), dim=-1)
+        return self.scale * nn.functional.normalize(x, dim=-1, eps=self.eps)
 
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, h, d_model, dropout=0.1):
-        super().__init__()
-        assert d_model % h == 0
-        self.d_k = d_model // h # d_v = d_k
-        self.h = h
-        self.linears = clone(nn.Linear(d_model, d_model), 4)
-        self.attn = None
-        self.dropout = nn.Dropout(p=dropout)
+    def __init__(self, n_heads, d_model, dropout=0.1):
+        super(MultiHeadAttention, self).__init__()
+        assert d_model % n_heads == 0
+        self.d_k = d_model // n_heads
+        self.n_heads = n_heads
+        self.linears = clone(Linear(d_model, d_model), 4)
+        self.dropout = nn.Dropout(dropout)
 
     @staticmethod
     def attention(query, key, value, mask=None, dropout=None):
         d_k = query.size(-1)
         scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, -torch.inf) # -1e9
-        p_attn = scores.softmax(dim=-1)
-        if dropout is not None:
-            p_attn = dropout(p_attn)
-        return p_attn @ value, p_attn
+            scores = scores.masked_fill(mask == 0, -torch.inf)
+        scores = torch.softmax(scores, dim=-1)
+        if dropout: scores = dropout(scores)
+        return scores @ value
 
     def forward(self, query, key, value, mask=None):
         if mask is not None:
             mask = mask.unsqueeze(1)
-        nbatches = query.size(0)
-
-        # 1) Do all the linear projections in batch from d_model => h x d_k
+        n_batches = query.size(0)
         query, key, value = [
-            lin(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
-            for lin, x in zip(self.linears, (query, key, value))
+            linear(x).view(n_batches, -1, self.n_heads, self.d_k).transpose(1, 2)
+            for linear, x in zip(self.linears, (query, key, value))
         ]
-
-        # 2) Apply attention on all the projected vectors in batch.
-        x, self.attn = self.attention(
-            query, key, value, mask=mask, dropout=self.dropout
-        )
-
-        # 3) "Concat" using a view and apply a final linear.
-        x = (
-            x.transpose(1, 2)
-            .contiguous()
-            .view(nbatches, -1, self.h * self.d_k)
-        )
-        del query
-        del key
-        del value
+        x = self.attention(query, key, value, mask, self.dropout)
+        x = x.transpose(1, 2).contiguous().view(n_batches, -1, self.n_heads * self.d_k)
         return self.linears[-1](x)
 
 class SublayerConnection(nn.Module):
 
-    def __init__(self, size, dropout):
-        super().__init__()
-        self.norm = LayerNorm(size)
+    def __init__(self, scale, dropout):
+        super(SublayerConnection, self).__init__()
+        self.norm = ScaleNorm(scale)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, sublayer):
@@ -140,22 +154,24 @@ class SublayerConnection(nn.Module):
 
 class EncoderLayer(nn.Module):
 
-    def __init__(self, d_model, d_ff, h, dropout):
-        super().__init__()
-        self.att = MultiHeadAttention(h, d_model)
+    def __init__(self, d_model, d_ff, n_heads, dropout):
+        super(EncoderLayer, self).__init__()
+        self.self_att = MultiHeadAttention(n_heads, d_model)
         self.ff = FeedForward(d_model, d_ff, dropout)
-        self.sublayers = clone(SublayerConnection(d_model, dropout), 2)
+        scale = torch.tensor(d_model, dtype=torch.float32)
+        self.sublayers = clone(SublayerConnection(torch.sqrt(scale), dropout), 2)
 
     def forward(self, x, mask):
-        x = self.sublayers[0](x, lambda x: self.att(x, x, x, mask))
+        x = self.sublayers[0](x, lambda x: self.self_att(x, x, x, mask))
         return self.sublayers[1](x, self.ff)
 
 class Encoder(nn.Module):
 
-    def __init__(self, d_model, d_ff, h, dropout, N):
-        super().__init__()
-        self.layers = clone(EncoderLayer(d_model, d_ff, h, dropout), N)
-        self.norm = LayerNorm(d_model)
+    def __init__(self, d_model, d_ff, n_heads, dropout, N):
+        super(Encoder, self).__init__()
+        self.layers = clone(EncoderLayer(d_model, d_ff, n_heads, dropout), N)
+        scale = torch.tensor(d_model, dtype=torch.float32)
+        self.norm = ScaleNorm(torch.sqrt(scale))
 
     def forward(self, x, mask):
         for layer in self.layers:
@@ -164,24 +180,26 @@ class Encoder(nn.Module):
 
 class DecoderLayer(nn.Module):
 
-    def __init__(self, d_model, d_ff, h, dropout):
-        super().__init__()
-        self.att1 = MultiHeadAttention(h, d_model)
-        self.att2 = MultiHeadAttention(h, d_model)
+    def __init__(self, d_model, d_ff, n_heads, dropout):
+        super(DecoderLayer, self).__init__()
+        self.self_att  = MultiHeadAttention(n_heads, d_model)
+        self.cross_att = MultiHeadAttention(n_heads, d_model)
         self.ff = FeedForward(d_model, d_ff, dropout)
-        self.sublayers = clone(SublayerConnection(d_model, dropout), 3)
+        scale = torch.tensor(d_model, dtype=torch.float32)
+        self.sublayers = clone(SublayerConnection(torch.sqrt(scale), dropout), 3)
 
     def forward(self, x, m, src_mask, tgt_mask):
-        x = self.sublayers[0](x, lambda x: self.att1(x, x, x, tgt_mask))
-        x = self.sublayers[1](x, lambda x: self.att2(x, m, m, src_mask))
+        x = self.sublayers[0](x, lambda x: self.self_att(x, x, x, tgt_mask))
+        x = self.sublayers[1](x, lambda x: self.cross_att(x, m, m, src_mask))
         return self.sublayers[2](x, self.ff)
 
 class Decoder(nn.Module):
 
-    def __init__(self, d_model, d_ff, h, dropout, N):
-        super().__init__()
-        self.layers = clone(DecoderLayer(d_model, d_ff, h, dropout), N)
-        self.norm = LayerNorm(d_model)
+    def __init__(self, d_model, d_ff, n_heads, dropout, N):
+        super(Decoder, self).__init__()
+        self.layers = clone(DecoderLayer(d_model, d_ff, n_heads, dropout), N)
+        scale = torch.tensor(d_model, dtype=torch.float32)
+        self.norm = ScaleNorm(torch.sqrt(scale))
 
     def forward(self, x, enc, src_mask, tgt_mask):
         for layer in self.layers:
@@ -190,12 +208,12 @@ class Decoder(nn.Module):
 
 class Model(nn.Module):
 
-    def __init__(self, src_vocab, tgt_vocab, d_model=512, d_ff=2048, h=8, dropout=0.1, N=6):
-        super().__init__()
+    def __init__(self, src_vocab, tgt_vocab, d_model=512, d_ff=2048, n_heads=8, dropout=0.1, N=6):
+        super(Model, self).__init__()
         self.src_vocab = src_vocab
         self.tgt_vocab = tgt_vocab
-        self.encoder = Encoder(d_model, d_ff, h, dropout, N)
-        self.decoder = Decoder(d_model, d_ff, h, dropout, N)
+        self.encoder = Encoder(d_model, d_ff, n_heads, dropout, N)
+        self.decoder = Decoder(d_model, d_ff, n_heads, dropout, N)
         self.src_embed = nn.Sequential(Embedding(d_model, src_vocab), PositionalEncoding(d_model, dropout))
         self.tgt_embed = nn.Sequential(Embedding(d_model, tgt_vocab), PositionalEncoding(d_model, dropout))
         self.generator = LogSoftmax(d_model, tgt_vocab)
@@ -203,29 +221,53 @@ class Model(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, src, tgt, src_mask, tgt_mask):
-        return self.decode(self.encode(src, src_mask), src_mask, tgt, tgt_mask)
+    def forward(self, src_nums, tgt_nums, src_mask, tgt_mask):
+        return self.decode(self.encode(src_nums, src_mask), src_mask, tgt_nums, tgt_mask)
 
-    def encode(self, src, src_mask):
-        return self.encoder(self.src_embed(src), src_mask)
+    def encode(self, src_nums, src_mask):
+        return self.encoder(self.src_embed(src_nums), src_mask)
 
-    def decode(self, enc, src_mask, tgt, tgt_mask):
-        return self.decoder(self.tgt_embed(tgt), enc, src_mask, tgt_mask)
+    def decode(self, enc, src_mask, tgt_nums, tgt_mask):
+        return self.decoder(self.tgt_embed(tgt_nums), enc, src_mask, tgt_mask)
 
 def subsequent_mask(size):
     att_shape = (1, size, size)
-    subsequent_mask = torch.triu(torch.ones(att_shape), diagonal=1).type(torch.uint8)
-    return subsequent_mask == 0
+    int_mask = torch.triu(torch.ones(att_shape, dtype=torch.uint8), diagonal=1)
+    return int_mask == 0
 
-class LossCompute:
+class LossFunction:
 
-    def __init__(self, generator, criterion):
+    def __init__(self, generator, criterion, ignore_index=None):
         self.generator = generator
         self.criterion = criterion
+        self.ignore_index = ignore_index
 
     def __call__(self, x, y):
-        x = self.generator(x)
+        x = self.generator(x, self.ignore_index)
         return self.criterion(x.contiguous().view(-1, x.size(-1)), y.contiguous().view(-1))
+
+class EarlyStopping:
+
+    def __init__(self, patience, min_delta=0.):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.count = 0
+
+    def __call__(self, curr_loss, prev_loss):
+        if (curr_loss - prev_loss) > self.min_delta:
+            self.count += 1
+            if self.count >= self.patience:
+                return True
+
+class LabelSmoothing(torch.nn.Module):
+
+    def __init__(self, smoothing):
+        super(LabelSmoothing, self).__init__()
+        self.smoothing = smoothing
+
+    def forward(self, input, target):
+        l = torch.gather(input, dim=-1, index=target.unsqueeze(-1))
+        return (self.smoothing - 1) * l.sum() - self.smoothing * input.mean()
 
 class Vocab:
 
@@ -247,68 +289,85 @@ class Vocab:
             self.word_to_num.pop(word)
 
     def numberize(self, *words):
-        nums = [self.word_to_num[word] if word in self.word_to_num
-            else self.word_to_num['<UNK>'] for word in words]
-        return torch.tensor(nums) if len(nums) > 1 else torch.tensor(nums[:1])
+        nums = torch.tensor([self.word_to_num[word] if word in self.word_to_num
+            else self.word_to_num['<UNK>'] for word in words])
+        return nums[0] if len(nums) == 1 else nums
 
     def denumberize(self, *nums):
         words = [self.num_to_word[num] for num in nums]
-        return words if len(words) > 1 else words[0]
+        return words[0] if len(words) == 1 else words
 
     def __len__(self):
         return len(self.num_to_word)
 
 class Batch:
 
-    def __init__(self, src, tgt=None, pad=2):
-        self.src = src
-        self.src_mask = (src != pad).unsqueeze(-2)
-        if tgt is not None:
-            self.tgt = tgt[:, :-1]
-            self.tgt_y = tgt[:, 1:]
-            self.tgt_mask = self.create_mask(self.tgt, pad)
-            self.ntokens = (self.tgt_y != pad).detach().sum()
+    def __init__(self, src_nums, tgt_nums=None, padding_idx=2):
+        self.src_nums = src_nums
+        self.src_mask = (src_nums != padding_idx).unsqueeze(-2)
+        if tgt_nums is not None:
+            self.tgt_nums = tgt_nums[:, :-1]
+            self.tgt_y = tgt_nums[:, 1:]
+            self.tgt_mask = self.create_mask(self.tgt_nums, padding_idx)
+            self.n_tokens = (self.tgt_y != padding_idx).detach().sum()
 
     @staticmethod
-    def create_mask(tgt, pad):
-        tgt_mask = (tgt != pad).unsqueeze(-2)
-        tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(tgt_mask.detach())
+    def create_mask(tgt_nums, padding_idx):
+        tgt_mask = (tgt_nums != padding_idx).unsqueeze(-2)
+        tgt_mask = tgt_mask & subsequent_mask(tgt_nums.size(-1)).type_as(tgt_mask.detach())
         return tgt_mask
 
-def train_epoch(data, model, src_vocab, tgt_vocab, loss_compute, optimizer=None, mode='train'):
+def batch_data(data, batch_size):
+    data.sort(key=lambda x: len(x[0]))
+    batched = []
+    for i in range(batch_size, len(data) + 1, batch_size):
+        batch = data[(i - batch_size):i]
+        src_max_len = max(len(src_words) for src_words, _ in batch)
+        tgt_max_len = max(len(tgt_words) for _, tgt_words in batch)
+        for src_words, tgt_words in batch:
+            src_res = src_max_len - len(src_words)
+            tgt_res = tgt_max_len - len(tgt_words)
+            if src_res > 0:
+                src_words.extend(src_res * ['<PAD>'])
+            if tgt_res > 0:
+                tgt_words.extend(tgt_res * ['<PAD>'])
+        batched.append(batch)
+    return batched
+
+def train_epoch(data, model, src_vocab, tgt_vocab, loss_func, optimizer=None, mode='train'):
     total_loss = 0.
     total_tokens = 0
     progress = tqdm.tqdm if mode == 'train' else iter
     for batch in progress(data):
-        src, tgt = zip(*batch)
-        src = torch.stack([src_vocab.numberize(*words) for words in src]).to(device)
-        tgt = torch.stack([tgt_vocab.numberize(*words) for words in tgt]).to(device)
-        batch = Batch(src, tgt, 2)
-        out = model(batch.src, batch.tgt, batch.src_mask, batch.tgt_mask)
-        loss = loss_compute(out, batch.tgt_y)
+        src_words, tgt_words = zip(*batch)
+        src_nums = torch.stack([src_vocab.numberize(*words) for words in src_words]).to(device)
+        tgt_nums = torch.stack([tgt_vocab.numberize(*words) for words in tgt_words]).to(device)
+        batch = Batch(src_nums, tgt_nums, padding_idx=2)
+        out = model(batch.src_nums, batch.tgt_nums, batch.src_mask, batch.tgt_mask)
+        loss = loss_func(out, batch.tgt_y)
         if mode == 'train':
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
         total_loss += loss.item()
-        total_tokens += batch.ntokens
+        total_tokens += batch.n_tokens
         del loss
     return total_loss / total_tokens
 
 def greedy_search(model, batch, max_len=256, start_token=0, end_token=1):
-    enc = model.encode(batch.src, batch.src_mask)
-    tgt = torch.full((1, 1), start_token)
+    enc = model.encode(batch.src_nums, batch.src_mask)
+    tgt = torch.full((1, 1), start_token).to(device)
     for _ in range(max_len):
-        tgt_mask = subsequent_mask(tgt.size(-1))
+        tgt_mask = subsequent_mask(tgt.size(-1)).to(device)
         y = model.decode(enc, batch.src_mask, tgt, tgt_mask)
         z = model.generator(y[:, -1])
         next_token = torch.argmax(z, dim=-1)
-        tgt = torch.cat([tgt, next_token.unsqueeze(0)], dim=-1)
         if next_token == end_token: break
-    return tgt
+        tgt = torch.cat([tgt, next_token.unsqueeze(0)], dim=-1)
+    return tgt[:, 1:]
 
 def beam_search(model, batch, beam_size=5, max_len=256, start_token=0, end_token=1):
-    enc = model.encode(batch.src, batch.src_mask)
+    enc = model.encode(batch.src_nums, batch.src_mask)
     scores = torch.zeros(1, device=device)
     paths = torch.full((1, max_len + 1), start_token, device=device)
 
@@ -336,26 +395,9 @@ def beam_search(model, batch, beam_size=5, max_len=256, start_token=0, end_token
     for score, path in complete:
         score /= path.size(-1)
     complete.sort(key=lambda state: -state[0])
-    return [path for _, path in complete]
+    return [path[1:] for _, path in complete]
 
-def batch_data(data, batch_size):
-    data.sort(key=lambda x: len(x[0]))
-    batched = []
-    for i in range(batch_size, len(data) + 1, batch_size):
-        batch = data[(i - batch_size):i]
-        src_max_len = max(len(src_words) for src_words, _ in batch)
-        tgt_max_len = max(len(tgt_words) for _, tgt_words in batch)
-        for src_words, tgt_words in batch:
-            src_res = src_max_len - len(src_words)
-            tgt_res = tgt_max_len - len(tgt_words)
-            if src_res > 0:
-                src_words.extend(src_res * ['<PAD>'])
-            if tgt_res > 0:
-                tgt_words.extend(tgt_res * ['<PAD>'])
-        batched.append(batch)
-    return batched
-
-def train_model(train_file, max_len, batch_size):
+def train_model(train_file, n_epochs, lr, patience, smoothing, batch_size, max_len):
     train_data = []
     for line in open(train_file):
         src_line, tgt_line = line.split('\t')
@@ -370,22 +412,21 @@ def train_model(train_file, max_len, batch_size):
     train_data = batch_data(train_data[:split_point], batch_size)
 
     src_vocab = tgt_vocab = Vocab()
-    with open('data/vocab.bpe') as vocab_file:
+    with open(f'data/vocab.{src_lang}{tgt_lang}') as vocab_file:
         for line in vocab_file.readlines():
             src_vocab.add(line.split()[0])
     pad_idx = tgt_vocab.padding_idx
 
     model = Model(len(src_vocab), len(tgt_vocab)).to(device)
-    model.src_embed[0].emb.weight = model.tgt_embed[0].emb.weight
-    model.generator.proj.weight = model.tgt_embed[0].emb.weight
+    model.src_embed[0].weight = model.tgt_embed[0].weight
+    model.generator.weight = model.tgt_embed[0].weight
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    criterion = LabelSmoothing(smoothing)
+    optimizer = torch.optim.Adam(model.parameters(), lr)
+    earlystop = EarlyStopping(patience)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    scheduler = ReduceLROnPlateau(optimizer)
-
-    best_score = 0.
-    for epoch in range(10):
+    best_score, prev_loss = 0., torch.inf
+    for epoch in range(n_epochs):
         random.shuffle(train_data)
     
         start = time.time()
@@ -395,7 +436,7 @@ def train_model(train_file, max_len, batch_size):
             model,
             src_vocab,
             tgt_vocab,
-            LossCompute(model.generator, criterion),
+            LossFunction(model.generator, criterion, ignore_index=pad_idx),
             optimizer,
             mode='train',
         )
@@ -406,15 +447,13 @@ def train_model(train_file, max_len, batch_size):
             model,
             src_vocab,
             tgt_vocab,
-            LossCompute(model.generator, criterion),
+            LossFunction(model.generator, criterion, ignore_index=pad_idx),
             mode='eval',
         )
         elapsed = timedelta(seconds=(time.time() - start))
 
-        scheduler.step(valid_loss)
-        lr = optimizer.param_groups[0]['lr']
         with open('DEBUG.log', 'a') as outfile:
-            output = f'[{epoch + 1}] Train Loss: {train_loss} | Valid Loss: {valid_loss} | Learning Rate: {lr}'
+            output = f'[{epoch + 1}] Train Loss: {train_loss} | Valid Loss: {valid_loss}'
             print(output, flush=True)
             outfile.write(output + f' | Train Time: {elapsed}\n')
 
@@ -423,14 +462,13 @@ def train_model(train_file, max_len, batch_size):
         with torch.no_grad():
             for batch in valid_data:
                 for src_words, tgt_words in batch:
-                    src = src_vocab.numberize(*src_words).to(device)
-                    tgt = tgt_vocab.numberize(*tgt_words).to(device)
-                    batch = Batch(src.unsqueeze(0), tgt.unsqueeze(0), pad_idx)
-                    model_out = beam_search(model, batch, beam_size=5)[0]
+                    src_nums = src_vocab.numberize(*src_words).to(device)
+                    tgt_nums = tgt_vocab.numberize(*tgt_words).to(device)
+                    batch = Batch(src_nums.unsqueeze(0), tgt_nums.unsqueeze(0), pad_idx)
+                    model_out = beam_search(model, batch, beam_size=5)
                     reference.append(detokenize([tgt_vocab.denumberize(x)
-                        for x in batch.tgt[0] if x != pad_idx]))
-                    candidate.append(detokenize([tgt_vocab.denumberize(x)
-                        for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
+                        for x in batch.tgt_nums[0] if x != pad_idx]))
+                    candidate.append(detokenize(tgt_vocab.denumberize(*model_out[0])))
         bleu_score = bleu.corpus_score(candidate, [reference])
         chrf_score = chrf.corpus_score(candidate, [reference])
         elapsed = timedelta(seconds=(time.time() - start))
@@ -440,9 +478,15 @@ def train_model(train_file, max_len, batch_size):
             print(output, flush=True)
             outfile.write(output + f' | Decode Time: {elapsed}\n')
         if bleu_score.score > best_score:
-            torch.save(model.state_dict(), f'model_{src_lang}-{tgt_lang}')
+            print('saving model...', flush=True)
+            torch.save(model.state_dict(), f'model.{src_lang}{tgt_lang}')
             best_score = bleu_score.score
         print()
+
+        if earlystop(valid_loss, prev_loss):
+            print('stopping early...', flush=True)
+            break
+        prev_loss = valid_loss
 
 def score_model(test_file, max_len):
     test_data = []
@@ -454,27 +498,26 @@ def score_model(test_file, max_len):
             test_data.append((src_words, tgt_words))
 
     src_vocab = tgt_vocab = Vocab()
-    with open('data/vocab.bpe') as vocab_file:
+    with open(f'data/vocab.{src_lang}{tgt_lang}') as vocab_file:
         for line in vocab_file.readlines():
             src_vocab.add(line.split()[0])
     pad_idx = src_vocab.padding_idx
 
     model = Model(len(src_vocab), len(tgt_vocab)).to(device)
-    model.load_state_dict(torch.load(f'model_{src_lang}-{tgt_lang}', map_location=device))
+    model.load_state_dict(torch.load(f'model.{src_lang}{tgt_lang}', map_location=device))
     model.eval()
 
     start = time.time()
     candidate, reference = [], []
     with torch.no_grad():
         for src_words, tgt_words in tqdm.tqdm(test_data):
-            src = src_vocab.numberize(*src_words).to(device)
-            tgt = tgt_vocab.numberize(*tgt_words).to(device)
-            batch = Batch(src.unsqueeze(0), tgt.unsqueeze(0), pad_idx)
-            model_out = beam_search(model, batch, beam_size=5)[0]
+            src_nums = src_vocab.numberize(*src_words).to(device)
+            tgt_nums = tgt_vocab.numberize(*tgt_words).to(device)
+            batch = Batch(src_nums.unsqueeze(0), tgt_nums.unsqueeze(0), pad_idx)
+            model_out = beam_search(model, batch, beam_size=5)
             reference.append(detokenize([tgt_vocab.denumberize(x)
-                for x in batch.tgt[0] if x != pad_idx]))
-            candidate.append(detokenize([tgt_vocab.denumberize(x)
-                for x in model_out if x != pad_idx]).split('<EOS>')[0] + ' <EOS>')
+                for x in batch.tgt_nums[0] if x != pad_idx]))
+            candidate.append(detokenize(tgt_vocab.denumberize(*model_out[0])))
     bleu_score = bleu.corpus_score(candidate, [reference])
     chrf_score = chrf.corpus_score(candidate, [reference])
     elapsed = timedelta(seconds=(time.time() - start))
@@ -484,41 +527,37 @@ def score_model(test_file, max_len):
         print(output, flush=True)
         outfile.write(output + f' | Decode Time: {elapsed}')
     with open('data/test.out', 'w') as outfile:
-        for words in candidate:
-            outfile.write(words.split('<BOS> ')[1].split('<EOS>')[0] + '\n')
+        outfile.writelines(candidate)
 
 def translate(input):
-    mt, bpe = MosesTokenizer(lang=src_lang), BPE(open('data/bpe.out'))
-    input = bpe.process_line(mt.tokenize(input, return_str=True))
+    bpe = BPE(open(f'data/bpe.{src_lang}{tgt_lang}'))
+    input = bpe.process_line(tokenize(input))
     words = ['<BOS>'] + input.split() + ['<EOS>']
 
     src_vocab = tgt_vocab = Vocab()
-    with open('data/vocab.bpe') as vocab_file:
+    with open(f'data/vocab.{src_lang}{tgt_lang}') as vocab_file:
         for line in vocab_file.readlines():
             src_vocab.add(line.split()[0])
     pad_idx = src_vocab.padding_idx
 
     model = Model(len(src_vocab), len(tgt_vocab)).to(device)
-    model.load_state_dict(torch.load(f'model_{src_lang}-{tgt_lang}', map_location=device))
+    model.load_state_dict(torch.load(f'model.{src_lang}{tgt_lang}', map_location=device))
     model.eval()
 
     with torch.no_grad():
-        src = src_vocab.numberize(*words).to(device)
-        batch = Batch(src.unsqueeze(0), pad=pad_idx)
-        model_out = beam_search(model, batch, beam_size=5)[0]
-
-    translation = detokenize([tgt_vocab.denumberize(x)
-        for x in model_out if x != pad_idx])
-    return translation.split('<BOS> ')[1].split('<EOS>')[0]
+        src_nums = src_vocab.numberize(*words).to(device)
+        batch = Batch(src_nums.unsqueeze(0), padding_idx=pad_idx)
+        model_out = beam_search(model, batch, beam_size=5)
+    return detokenize(tgt_vocab.denumberize(*model_out[0]))
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
-    parser.add_argument('src_lang', type=str, help='source language')
-    parser.add_argument('tgt_lang', type=str, help='target language')
     group.add_argument('--train', metavar='FILE', help='train model')
     group.add_argument('--score', metavar='FILE', help='score model')
+    parser.add_argument('src_lang', type=str, help='source language')
+    parser.add_argument('tgt_lang', type=str, help='target language')
     group.add_argument('input', nargs='?', type=str, help='input string for translation')
     args = parser.parse_args()
 
@@ -526,8 +565,19 @@ if __name__ == '__main__':
     tgt_lang = args.tgt_lang
 
     if args.train:
-        train_model(args.train, max_len=128, batch_size=32)
+        train_model(
+            args.train,
+            n_epochs=15,
+            lr=3e-4,
+            patience=2,
+            smoothing=0.1,
+            batch_size=32,
+            max_len=128
+        )
     elif args.score:
-        score_model(args.score, max_len=128)
+        score_model(
+            args.score,
+            max_len=128
+        )
     elif args.input:
         print(translate(args.input))

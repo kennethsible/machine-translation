@@ -18,6 +18,10 @@ def detokenize(output):
     md = MosesDetokenizer(lang=tgt_lang)
     return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(output))
 
+def subsequent_mask(size):
+    mask = torch.ones((1, size, size), dtype=torch.uint8)
+    return torch.triu(mask, diagonal=1) == 0
+
 def clone(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
@@ -31,7 +35,7 @@ class Linear(nn.Module):
         torch.nn.init.normal_(self.bias, std=0.01)
 
     def forward(self, x):
-        return x @ torch.transpose(self.weight, 0, 1) + self.bias
+        return x @ self.weight.transpose(0, 1) + self.bias
 
 class LogSoftmax(nn.Module):
 
@@ -40,13 +44,10 @@ class LogSoftmax(nn.Module):
         self.weight = torch.nn.Parameter(torch.empty(d_model, vocab))
         torch.nn.init.normal_(self.weight, std=0.01)
 
-    def forward(self, x, ignore_index=None):
+    def forward(self, x):
         # https://aclanthology.org/N18-1031
         weight = nn.functional.normalize(self.weight, dim=-1)
-        y = x @ torch.transpose(weight, 0, 1)
-        if ignore_index is not None:
-            y[..., ignore_index] = -torch.inf
-        return torch.log_softmax(y, dim=-1).nan_to_num(neginf=0.)
+        return torch.log_softmax(x @ weight.transpose(0, 1), dim=-1)
 
 class Embedding(nn.Module):
 
@@ -139,7 +140,7 @@ class MultiHeadAttention(nn.Module):
             for linear, x in zip(self.linears, (query, key, value))
         ]
         x = self.attention(query, key, value, mask, self.dropout)
-        x = x.transpose(1, 2).contiguous().view(n_batches, -1, self.n_heads * self.d_k)
+        x = x.transpose(1, 2).reshape(n_batches, -1, self.n_heads * self.d_k)
         return self.linears[-1](x)
 
 class SublayerConnection(nn.Module):
@@ -230,36 +231,7 @@ class Model(nn.Module):
     def decode(self, enc, src_mask, tgt_nums, tgt_mask):
         return self.decoder(self.tgt_embed(tgt_nums), enc, src_mask, tgt_mask)
 
-def subsequent_mask(size):
-    att_shape = (1, size, size)
-    int_mask = torch.triu(torch.ones(att_shape, dtype=torch.uint8), diagonal=1)
-    return int_mask == 0
-
-class LossFunction:
-
-    def __init__(self, generator, criterion, ignore_index=None):
-        self.generator = generator
-        self.criterion = criterion
-        self.ignore_index = ignore_index
-
-    def __call__(self, x, y):
-        x = self.generator(x, self.ignore_index)
-        return self.criterion(x.contiguous().view(-1, x.size(-1)), y.contiguous().view(-1))
-
-class EarlyStopping:
-
-    def __init__(self, patience, min_delta=0.):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.count = 0
-
-    def __call__(self, curr_loss, prev_loss):
-        if (curr_loss - prev_loss) > self.min_delta:
-            self.count += 1
-            if self.count >= self.patience:
-                return True
-
-class LabelSmoothing(torch.nn.Module):
+class LabelSmoothing(nn.Module):
 
     def __init__(self, smoothing):
         super(LabelSmoothing, self).__init__()
@@ -317,34 +289,48 @@ class Batch:
         tgt_mask = tgt_mask & subsequent_mask(tgt_nums.size(-1)).type_as(tgt_mask.detach())
         return tgt_mask
 
-def batch_data(data, batch_size):
-    data.sort(key=lambda x: len(x[0]))
-    batched = []
-    for i in range(batch_size, len(data) + 1, batch_size):
-        batch = data[(i - batch_size):i]
-        src_max_len = max(len(src_words) for src_words, _ in batch)
-        tgt_max_len = max(len(tgt_words) for _, tgt_words in batch)
-        for src_words, tgt_words in batch:
-            src_res = src_max_len - len(src_words)
-            tgt_res = tgt_max_len - len(tgt_words)
-            if src_res > 0:
-                src_words.extend(src_res * ['<PAD>'])
-            if tgt_res > 0:
-                tgt_words.extend(tgt_res * ['<PAD>'])
-        batched.append(batch)
-    return batched
+    @staticmethod
+    def batch_data(data, batch_size):
+        data.sort(key=lambda x: len(x[0]))
+        batched = []
+        for i in range(batch_size, len(data) + 1, batch_size):
+            batch = data[(i - batch_size):i]
+            src_max_len = max(len(src_words) for src_words, _ in batch)
+            tgt_max_len = max(len(tgt_words) for _, tgt_words in batch)
+            for src_words, tgt_words in batch:
+                src_res = src_max_len - len(src_words)
+                tgt_res = tgt_max_len - len(tgt_words)
+                if src_res > 0:
+                    src_words.extend(src_res * ['<PAD>'])
+                if tgt_res > 0:
+                    tgt_words.extend(tgt_res * ['<PAD>'])
+            batched.append(batch)
+        return batched
 
-def train_epoch(data, model, src_vocab, tgt_vocab, loss_func, optimizer=None, mode='train'):
-    total_loss = 0.
-    total_tokens = 0
+class EarlyStopping:
+
+    def __init__(self, patience, min_delta=0.):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.count = 0
+
+    def __call__(self, curr_loss, prev_loss):
+        if (curr_loss - prev_loss) > self.min_delta:
+            self.count += 1
+            if self.count >= self.patience:
+                return True
+
+def train_epoch(data, model, src_vocab, tgt_vocab, criterion, optimizer=None, mode='train'):
+    total_loss = total_tokens = 0.
     progress = tqdm.tqdm if mode == 'train' else iter
     for batch in progress(data):
         src_words, tgt_words = zip(*batch)
         src_nums = torch.stack([src_vocab.numberize(*words) for words in src_words]).to(device)
         tgt_nums = torch.stack([tgt_vocab.numberize(*words) for words in tgt_words]).to(device)
-        batch = Batch(src_nums, tgt_nums, padding_idx=2)
-        out = model(batch.src_nums, batch.tgt_nums, batch.src_mask, batch.tgt_mask)
-        loss = loss_func(out, batch.tgt_y)
+        batch = Batch(src_nums, tgt_nums, src_vocab.padding_idx)
+        logits = model(batch.src_nums, batch.tgt_nums, batch.src_mask, batch.tgt_mask)
+        lprobs = model.generator(logits)
+        loss = criterion(lprobs.reshape(-1, lprobs.size(-1)), batch.tgt_y.reshape(-1))
         if mode == 'train':
             optimizer.zero_grad()
             loss.backward()
@@ -375,10 +361,10 @@ def beam_search(model, batch, beam_size=5, max_len=256, start_token=0, end_token
     for i in range(1, max_len + 1):
         enc_expand = enc.expand(paths.size(0), -1, -1)
         paths_mask = subsequent_mask(i).to(device)
-        y = model.decode(enc_expand, batch.src_mask, paths[:, :i], paths_mask)
-        z = model.generator(y[:, -1])
+        logits = model.decode(enc_expand, batch.src_mask, paths[:, :i], paths_mask)
+        lprobs = model.generator(logits[:, -1])
 
-        hypotheses = torch.add(scores.unsqueeze(1), z).flatten()
+        hypotheses = torch.add(scores.unsqueeze(1), lprobs).flatten()
         topv, topi = torch.topk(hypotheses, beam_size)
         scores, paths = topv, paths[torch.trunc(topi / model.tgt_vocab).long()]
         paths[:, i] = torch.remainder(topi, model.tgt_vocab)
@@ -408,8 +394,8 @@ def train_model(train_file, n_epochs, lr, patience, smoothing, batch_size, max_l
     open('DEBUG.log', 'w').close()
 
     split_point = math.ceil(0.995 * len(train_data))
-    valid_data = batch_data(train_data[split_point:], batch_size)
-    train_data = batch_data(train_data[:split_point], batch_size)
+    valid_data = Batch.batch_data(train_data[split_point:], batch_size)
+    train_data = Batch.batch_data(train_data[:split_point], batch_size)
 
     src_vocab = tgt_vocab = Vocab()
     with open(f'data/vocab.{src_lang}{tgt_lang}') as vocab_file:
@@ -436,7 +422,7 @@ def train_model(train_file, n_epochs, lr, patience, smoothing, batch_size, max_l
             model,
             src_vocab,
             tgt_vocab,
-            LossFunction(model.generator, criterion, ignore_index=pad_idx),
+            criterion,
             optimizer,
             mode='train',
         )
@@ -447,7 +433,7 @@ def train_model(train_file, n_epochs, lr, patience, smoothing, batch_size, max_l
             model,
             src_vocab,
             tgt_vocab,
-            LossFunction(model.generator, criterion, ignore_index=pad_idx),
+            criterion,
             mode='eval',
         )
         elapsed = timedelta(seconds=(time.time() - start))

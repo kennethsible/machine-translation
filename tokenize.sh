@@ -42,7 +42,7 @@ sacremoses -l $src_lang -j 4 tokenize < "data/test/test.$src_lang" > "data/test/
 sacremoses -l $tgt_lang -j 4 tokenize < "data/test/test.$tgt_lang" > "data/test/test.tok.$tgt_lang"
 
 echo -e "\nPerforming Tokenization with BPE..."
-cat "data/train.tok.$src_lang" "data/train.tok.$tgt_lang" | subword-nmt learn-bpe -s 10000 -o "data/bpe.$src_lang$tgt_lang"
+cat "data/train.tok.$src_lang" "data/train.tok.$tgt_lang" | subword-nmt learn-bpe -s 32000 -o "data/bpe.$src_lang$tgt_lang"
 ln -s "bpe.$src_lang$tgt_lang" "data/bpe.$tgt_lang$src_lang"
 subword-nmt apply-bpe -c "data/bpe.$src_lang$tgt_lang" < "data/train.tok.$src_lang" > "data/train.tok.bpe.$src_lang"
 subword-nmt apply-bpe -c "data/bpe.$src_lang$tgt_lang" < "data/train.tok.$tgt_lang" > "data/train.tok.bpe.$tgt_lang"

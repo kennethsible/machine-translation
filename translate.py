@@ -10,15 +10,14 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 bleu, chrf = BLEU(), CHRF()
 
 def tokenize(input, src_lang):
-    mt = MosesTokenizer(src_lang)
-    return mt.tokenize(input, return_str=True)
+    return MosesTokenizer(src_lang).tokenize(input, return_str=True)
 
 def detokenize(output, tgt_lang):
-    md = MosesDetokenizer(tgt_lang)
-    return re.sub('(@@ )|(@@ ?$)', '', md.detokenize(output))
+    output = MosesDetokenizer(tgt_lang).detokenize(output)
+    return re.sub('(@@ )|(@@ ?$)', '', output)
 
 def subsequent_mask(size):
-    mask = torch.ones((1, size, size), dtype=torch.uint8)
+    mask = torch.ones((1, size, size), device=device)
     return torch.triu(mask, diagonal=1) == 0
 
 def clone(module, N):
@@ -124,7 +123,7 @@ class MultiHeadAttention(nn.Module):
     def attention(query, key, value, mask=None, dropout=None):
         d_k = query.size(-1)
         scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
-        if mask is not None:
+        if mask is not None: # TODO Score Caching
             scores = scores.masked_fill(mask == 0, -torch.inf)
         scores = torch.softmax(scores, dim=-1)
         if dropout: scores = dropout(scores)
@@ -201,9 +200,9 @@ class Decoder(nn.Module):
         scale = torch.tensor(d_model, dtype=torch.float32)
         self.norm = ScaleNorm(torch.sqrt(scale))
 
-    def forward(self, x, enc, src_mask, tgt_mask):
+    def forward(self, x, memory, src_mask, tgt_mask):
         for layer in self.layers:
-            x = layer(x, enc, src_mask, tgt_mask)
+            x = layer(x, memory, src_mask, tgt_mask)
         return self.norm(x)
 
 class Model(nn.Module):
@@ -213,12 +212,12 @@ class Model(nn.Module):
         self.vocab_size = vocab_size
         self.encoder = Encoder(d_model, d_ff, n_heads, dropout, N)
         self.decoder = Decoder(d_model, d_ff, n_heads, dropout, N)
-        self.src_embed = nn.Sequential(Embedding(d_model, vocab_size), PositionalEncoding(d_model, dropout))
-        self.tgt_embed = nn.Sequential(Embedding(d_model, vocab_size), PositionalEncoding(d_model, dropout))
-        self.generator = LogSoftmax(d_model, vocab_size)
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
+        self.src_embed = nn.Sequential(Embedding(d_model, vocab_size), PositionalEncoding(d_model, dropout))
+        self.tgt_embed = nn.Sequential(Embedding(d_model, vocab_size), PositionalEncoding(d_model, dropout))
+        self.generator = LogSoftmax(d_model, vocab_size)
 
     def forward(self, src_nums, tgt_nums, src_mask, tgt_mask):
         return self.decode(self.encode(src_nums, src_mask), src_mask, tgt_nums, tgt_mask)
@@ -226,8 +225,8 @@ class Model(nn.Module):
     def encode(self, src_nums, src_mask):
         return self.encoder(self.src_embed(src_nums), src_mask)
 
-    def decode(self, enc, src_mask, tgt_nums, tgt_mask):
-        return self.decoder(self.tgt_embed(tgt_nums), enc, src_mask, tgt_mask)
+    def decode(self, memory, src_mask, tgt_nums, tgt_mask):
+        return self.decoder(self.tgt_embed(tgt_nums), memory, src_mask, tgt_mask)
 
 class LabelSmoothing(nn.Module):
 
@@ -260,36 +259,40 @@ class Vocab:
 
     def numberize(self, *words):
         nums = torch.tensor([self.word_to_num[word] if word in self.word_to_num
-            else self.word_to_num['<UNK>'] for word in words])
+            else self.word_to_num['<UNK>'] for word in words], device=device)
         return nums[0] if len(nums) == 1 else nums
 
     def denumberize(self, *nums):
         words = [self.num_to_word[num] for num in nums]
         return words[0] if len(words) == 1 else words
 
-    def __len__(self):
+    def size(self):
         return len(self.num_to_word)
 
 class Batch:
 
-    def __init__(self, src_nums, tgt_nums=None, padding_idx=2):
+    def __init__(self, src_nums, tgt_nums, padding_idx):
         self.src_nums = src_nums
-        self.src_mask = (src_nums != padding_idx).unsqueeze(-2)
-        if tgt_nums is not None:
-            self.tgt_nums = tgt_nums[:, :-1]
-            self.tgt_y = tgt_nums[:, 1:]
-            self.tgt_mask = self.create_mask(self.tgt_nums, padding_idx)
-            self.n_tokens = (self.tgt_y != padding_idx).detach().sum()
+        self.tgt_nums = tgt_nums
+        self.src_mask = (self.src_nums != padding_idx).unsqueeze(-2)
+        self.tgt_mask = (self.tgt_nums != padding_idx).unsqueeze(-2)
+        self.n_tokens = self.tgt_mask.detach().sum()
+        self.tgt_mask = self.tgt_mask & subsequent_mask(self.tgt_nums.size(-1))
 
     @staticmethod
-    def create_mask(tgt_nums, padding_idx):
-        tgt_mask = (tgt_nums != padding_idx).unsqueeze(-2)
-        tgt_mask = tgt_mask & subsequent_mask(tgt_nums.size(-1)).type_as(tgt_mask.detach())
-        return tgt_mask
-
-    @staticmethod
-    def batch_data(data, batch_size):
+    def load_data(data_file, data_limit=None, batch_size=None, max_len=None):
+        data = []
+        with open(data_file) as file:
+            for line in file:
+                if data_limit and len(data) > data_limit: break
+                src_line, tgt_line = line.split('\t')
+                src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
+                tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
+                if not max_len or 2 < len(src_words) <= max_len and 2 < len(tgt_words) <= max_len:
+                    data.append((src_words, tgt_words))
         data.sort(key=lambda x: len(x[0]))
+        if batch_size is None: return data
+
         batched = []
         for i in range(batch_size, len(data) + 1, batch_size):
             batch = data[(i - batch_size):i]
@@ -319,99 +322,82 @@ class EarlyStopping:
                 return True
 
 def train_epoch(data, model, vocab, criterion, optimizer=None, mode='train'):
-    total_loss = total_tokens = 0.
-    if mode == 'train':
-        data = tqdm.tqdm(data)
-    for batch in data:
+    total_loss = 0
+    for batch in tqdm.tqdm(data):
         src_words, tgt_words = zip(*batch)
-        src_nums = torch.stack([vocab.numberize(*words) for words in src_words]).to(device)
-        tgt_nums = torch.stack([vocab.numberize(*words) for words in tgt_words]).to(device)
-        batch = Batch(src_nums, tgt_nums, vocab.padding_idx)
+        src_nums = torch.stack([vocab.numberize(*words) for words in src_words])
+        tgt_nums = torch.stack([vocab.numberize(*words) for words in tgt_words])
+        batch = Batch(src_nums, tgt_nums[:, :-1], vocab.padding_idx)
+
         logits = model(batch.src_nums, batch.tgt_nums, batch.src_mask, batch.tgt_mask)
         lprobs = model.generator(logits)
-        loss = criterion(lprobs.reshape(-1, lprobs.size(-1)), batch.tgt_y.reshape(-1))
+        loss = criterion(torch.flatten(lprobs, 0, 1), torch.flatten(tgt_nums[:, 1:]))
         if mode == 'train':
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-        total_loss += loss.item()
-        total_tokens += batch.n_tokens
-        del loss
-    return total_loss / total_tokens
+        total_loss += loss.item() / batch.n_tokens
+    return total_loss
 
-def greedy_search(model, batch, max_len=256, start_token=0, end_token=1):
-    enc = model.encode(batch.src_nums, batch.src_mask)
-    tgt = torch.full((1, 1), start_token).to(device)
-    for _ in range(max_len):
-        tgt_mask = subsequent_mask(tgt.size(-1)).to(device)
-        y = model.decode(enc, batch.src_mask, tgt, tgt_mask)
-        z = model.generator(y[:, -1])
-        next_token = torch.argmax(z, dim=-1)
-        if next_token == end_token: break
-        tgt = torch.cat([tgt, next_token.unsqueeze(0)], dim=-1)
-    return tgt[:, 1:]
-
-def beam_search(model, batch, beam_size=5, max_len=256, start_token=0, end_token=1):
-    enc = model.encode(batch.src_nums, batch.src_mask)
-    scores = torch.zeros(1, device=device)
-    paths = torch.full((1, max_len + 1), start_token, device=device)
-
-    complete = []
+def greedy_search(model, memory, src_mask=None, max_len=256, start_word=0, end_word=1):
+    path = torch.full((1, 1), start_word, device=device)
     for i in range(1, max_len + 1):
-        enc_expand = enc.expand(paths.size(0), -1, -1)
-        paths_mask = subsequent_mask(i).to(device)
-        logits = model.decode(enc_expand, batch.src_mask, paths[:, :i], paths_mask)
+        logits = model.decode(memory, src_mask, path, subsequent_mask(i))
+        lprobs = model.generator(logits[:, -1])
+        next_word = torch.argmax(lprobs, dim=-1)
+        if next_word == end_word: break
+        path = torch.cat([path, next_word.unsqueeze(0)], dim=-1)
+    return path.squeeze(0)[1:]
+
+def beam_search(model, memory, beam_size, src_mask=None, max_len=256, start_word=0, end_word=1):
+    probs = torch.zeros(beam_size, device=device)
+    paths = torch.full((beam_size, max_len + 1), start_word, device=device)
+
+    complete = [] # TODO Length Normalization
+    for i in range(1, max_len + 1):
+        logits = model.decode(memory.expand(beam_size, -1, -1),
+            src_mask, paths[:, :i], subsequent_mask(i))
         lprobs = model.generator(logits[:, -1])
 
-        hypotheses = torch.add(scores.unsqueeze(1), lprobs).flatten()
+        hypotheses = torch.add(probs.unsqueeze(1), lprobs).flatten()
         topv, topi = torch.topk(hypotheses, beam_size)
-        scores, paths = topv, paths[torch.trunc(topi / model.vocab_size).long()]
+        probs, paths = topv, paths[torch.trunc(topi / model.vocab_size).long()]
         paths[:, i] = torch.remainder(topi, model.vocab_size)
 
-        finished = paths[:, i] == end_token
-        complete.extend(zip(scores[finished], paths[finished, :i]))
-        scores, paths = scores[~finished], paths[~finished]
+        finished = paths[:, i] == end_word
+        complete.extend(zip(probs[finished], paths[finished, :i]))
+        probs, paths = probs[~finished], paths[~finished]
         if paths.size(0) < beam_size:
             beam_size = paths.size(0)
         if beam_size == 0: break
 
     if paths.size(0) > 0:
-        complete.extend(zip(scores, paths))
-    for score, path in complete:
-        score /= path.size(-1)
+        complete.extend(zip(probs, paths))
     complete.sort(key=lambda state: -state[0])
     return [path[1:] for _, path in complete]
 
 def train_model(train_file, val_file, vocab_file, model_file, tgt_lang, config):
-    def import_data(data_file):
-        data = []
-        with open(data_file) as f:
-            for line in f:
-                src_line, tgt_line = line.split('\t')
-                src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
-                tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
-                if len(src_words) <= config['max_len'] and len(tgt_words) <= config['max_len']:
-                    data.append((src_words, tgt_words))
-        return Batch.batch_data(data, config['batch_size'])
-    train_data, val_data = import_data(train_file), import_data(val_file)
-    assert len(train_data) > 0 and len(val_data) > 0
-    open('DEBUG.log', 'w').close()
+    train_data, val_data = [], []
+    for data, data_file in ((train_data, train_file), (val_data, val_file)):
+        data[:] = Batch.load_data(data_file, config['data_limit'],
+            config['batch_size'], config['max_len'])
+    assert 0 < len(val_data) < len(train_data)
 
     vocab = Vocab()
-    with open(vocab_file) as f:
-        for line in f.readlines():
+    with open(vocab_file) as file:
+        for line in file:
             vocab.add(line.split()[0])
-    vocab_size, pad_idx = len(vocab), vocab.padding_idx
+    open('DEBUG.log', 'w').close()
 
-    model = Model(vocab_size).to(device)
+    model = Model(vocab.size()).to(device)
     model.src_embed[0].weight = model.tgt_embed[0].weight
     model.generator.weight = model.tgt_embed[0].weight
 
     criterion = LabelSmoothing(config['smoothing'])
     optimizer = torch.optim.Adam(model.parameters(), config['lr'])
-    earlystop = EarlyStopping(config['patience'])
+    stopping = EarlyStopping(config['patience'])
 
-    best_score, prev_loss = 0., torch.inf
+    best_score, prev_loss = 0, torch.inf
     for epoch in range(config['n_epochs']):
         random.shuffle(train_data)
     
@@ -437,58 +423,56 @@ def train_model(train_file, val_file, vocab_file, model_file, tgt_lang, config):
             )
         elapsed = timedelta(seconds=(time.time() - start))
 
-        with open('DEBUG.log', 'a') as f:
+        with open('DEBUG.log', 'a') as file:
             output = f'[{epoch + 1}] Train Loss: {train_loss} | Validation Loss: {val_loss}'
             print(output, flush=True)
-            f.write(output + f' | Train Time: {elapsed}\n')
+            file.write(output + f' | Train Time: {elapsed}\n')
 
         start = time.time()
         candidate, reference = [], []
         with torch.no_grad():
             for batch in val_data:
                 for src_words, tgt_words in batch:
-                    src_nums = vocab.numberize(*src_words).to(device)
-                    tgt_nums = vocab.numberize(*tgt_words).to(device)
-                    batch = Batch(src_nums.unsqueeze(0), tgt_nums.unsqueeze(0), pad_idx)
-                    model_out = beam_search(model, batch, beam_size=5)
+                    src_nums = vocab.numberize(*src_words).unsqueeze(0)
+                    tgt_nums = vocab.numberize(*tgt_words).unsqueeze(0)
+                    batch = Batch(src_nums, tgt_nums, vocab.padding_idx)
+
+                    memory = model.encode(batch.src_nums, batch.src_mask)
+                    model_out = greedy_search(model, memory, batch.src_mask) if config['beam_size'] is None \
+                        else beam_search(model, memory, config['beam_size'], batch.src_mask)[0]
                     reference.append(detokenize([vocab.denumberize(x)
-                        for x in batch.tgt_nums[0] if x != pad_idx], tgt_lang))
-                    candidate.append(detokenize(vocab.denumberize(*model_out[0]), tgt_lang))
+                        for x in batch.tgt_nums[0] if x != vocab.padding_idx], tgt_lang))
+                    candidate.append(detokenize(vocab.denumberize(*model_out), tgt_lang))
+
         bleu_score = bleu.corpus_score(candidate, [reference])
         chrf_score = chrf.corpus_score(candidate, [reference])
         elapsed = timedelta(seconds=(time.time() - start))
 
-        with open('DEBUG.log', 'a') as f:
+        with open('DEBUG.log', 'a') as file:
             output = f'  {chrf_score} | {bleu_score}'
             print(output, flush=True)
-            f.write(output + f' | Decode Time: {elapsed}\n')
-        if bleu_score.score > best_score:
-            print('saving model...', flush=True)
-            torch.save(model.state_dict(), model_file)
-            best_score = bleu_score.score
-        print()
-
-        if earlystop(val_loss, prev_loss):
-            print('stopping early...', flush=True)
-            break
+            file.write(output + f' | Decode Time: {elapsed}\n')
+            if bleu_score.score > best_score:
+                print('Saving Model...', flush=True)
+                file.write('Saving Model...\n')
+                torch.save(model.state_dict(), model_file)
+                best_score = bleu_score.score
+            if stopping(val_loss, prev_loss):
+                print('Stopping Early...', flush=True)
+                file.write('Stopping Early...\n')
+                break
+            print()
         prev_loss = val_loss
 
 def score_model(test_file, vocab_file, model_file, out_file, tgt_lang, config):
-    test_data = []
-    for line in open(test_file):
-        src_line, tgt_line = line.split('\t')
-        src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
-        tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
-        if len(src_words) <= config['max_len'] and len(tgt_words) <= config['max_len']:
-            test_data.append((src_words, tgt_words))
+    test_data = Batch.load_data(test_file)
 
     vocab = Vocab()
-    with open(vocab_file) as f:
-        for line in f.readlines():
+    with open(vocab_file) as file:
+        for line in file:
             vocab.add(line.split()[0])
-    vocab_size, pad_idx = len(vocab), vocab.padding_idx
 
-    model = Model(vocab_size).to(device)
+    model = Model(vocab.size()).to(device)
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 
@@ -496,44 +480,48 @@ def score_model(test_file, vocab_file, model_file, out_file, tgt_lang, config):
     candidate, reference = [], []
     with torch.no_grad():
         for src_words, tgt_words in tqdm.tqdm(test_data):
-            src_nums = vocab.numberize(*src_words).to(device)
-            tgt_nums = vocab.numberize(*tgt_words).to(device)
-            batch = Batch(src_nums.unsqueeze(0), tgt_nums.unsqueeze(0), pad_idx)
-            model_out = beam_search(model, batch, beam_size=5)
+            src_nums = vocab.numberize(*src_words).unsqueeze(0)
+            tgt_nums = vocab.numberize(*tgt_words).unsqueeze(0)
+            batch = Batch(src_nums, tgt_nums, vocab.padding_idx)
+
+            memory = model.encode(batch.src_nums, batch.src_mask)
+            model_out = greedy_search(model, memory, batch.src_mask) if config['beam_size'] is None \
+                else beam_search(model, memory, config['beam_size'], batch.src_mask)[0]
             reference.append(detokenize([vocab.denumberize(x)
-                for x in batch.tgt_nums[0] if x != pad_idx], tgt_lang))
-            candidate.append(detokenize(vocab.denumberize(*model_out[0]), tgt_lang))
+                for x in batch.tgt_nums[0] if x != vocab.padding_idx], tgt_lang))
+            candidate.append(detokenize(vocab.denumberize(*model_out), tgt_lang))
+
     bleu_score = bleu.corpus_score(candidate, [reference])
     chrf_score = chrf.corpus_score(candidate, [reference])
     elapsed = timedelta(seconds=(time.time() - start))
 
-    with open(out_file, 'w') as f:
+    with open(out_file, 'w') as file:
         output = f'{chrf_score} | {bleu_score}'
         print(output, flush=True)
-        f.write(output + f' | Decode Time: {elapsed}\n\n')
+        file.write(output + f' | Decode Time: {elapsed}\n\n')
         for translation in candidate:
-            f.write(translation + '\n')
+            file.write(translation + '\n')
 
-def translate(input, vocab_file, codes_file, model_file, src_lang, tgt_lang):
-    with open(codes_file) as f:
-        input = BPE(f).process_line(tokenize(input, src_lang))
+def translate(input, vocab_file, codes_file, model_file, src_lang, tgt_lang, config):
+    with open(codes_file) as file:
+        input = BPE(file).process_line(tokenize(input, src_lang))
     words = ['<BOS>'] + input.split() + ['<EOS>']
 
     vocab = Vocab()
-    with open(vocab_file) as f:
-        for line in f.readlines():
+    with open(vocab_file) as file:
+        for line in file:
             vocab.add(line.split()[0])
-    vocab_size, pad_idx = len(vocab), vocab.padding_idx
 
-    model = Model(vocab_size).to(device)
+    model = Model(vocab.size()).to(device)
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.eval()
 
     with torch.no_grad():
-        src_nums = vocab.numberize(*words).to(device)
-        batch = Batch(src_nums.unsqueeze(0), padding_idx=pad_idx)
-        model_out = beam_search(model, batch, beam_size=5)
-    return detokenize(vocab.denumberize(*model_out[0]), tgt_lang)
+        src_nums = vocab.numberize(*words).unsqueeze(0)
+        memory = model.encode(src_nums, src_mask=None)
+        model_out = greedy_search(model, memory) if config['beam_size'] is None \
+            else beam_search(model, memory, config['beam_size'])[0]
+    return detokenize(vocab.denumberize(*model_out), tgt_lang)
 
 if __name__ == '__main__':
     import argparse
@@ -545,19 +533,19 @@ if __name__ == '__main__':
     train_parser.add_argument('--data', metavar='FILE', required=True, type=str, help='training data')
     train_parser.add_argument('--val', metavar='FILE', required=True, type=str, help='validation data')
     train_parser.add_argument('--langs', nargs=2, metavar='LANG', required=True, type=str, help='source/target language')
-    train_parser.add_argument('--vocab', metavar='FILE', required=True, type=str, help='model vocabulary')
+    train_parser.add_argument('--vocab', metavar='FILE', required=True, type=str, help='shared vocabulary')
     train_parser.add_argument('--save', metavar='FILE', type=str, help='save state_dict')
 
     score_parser = subparsers.add_parser('score', help='score model')
     score_parser.add_argument('--data', metavar='FILE', required=True, type=str, help='test data')
     score_parser.add_argument('--langs', nargs=2, metavar='LANG', required=True, type=str, help='source/target language')
-    score_parser.add_argument('--vocab', metavar='FILE', required=True, type=str, help='model vocabulary')
+    score_parser.add_argument('--vocab', metavar='FILE', required=True, type=str, help='shared vocabulary')
     score_parser.add_argument('--load', metavar='FILE', required=True, type=str, help='load state_dict')
     score_parser.add_argument('--out', metavar='FILE', required=True, type=str, help='save score/output')
 
     input_parser = subparsers.add_parser('input', help='translate input')
     input_parser.add_argument('--langs', nargs=2, metavar='LANG', required=True, type=str, help='source/target language')
-    input_parser.add_argument('--vocab', metavar='FILE', required=True, type=str, help='model vocabulary')
+    input_parser.add_argument('--vocab', metavar='FILE', required=True, type=str, help='shared vocabulary')
     input_parser.add_argument('--codes', metavar='FILE', required=True, type=str, help='BPE codes file')
     input_parser.add_argument('--load', metavar='FILE', required=True, type=str, help='load state_dict')
     input_parser.add_argument('string', type=str, help='input string')
@@ -568,10 +556,12 @@ if __name__ == '__main__':
         torch.manual_seed(args.seed)
 
     config = {
-        'n_epochs':     15,
+        'n_epochs':     25,
         'lr':           3e-4,
         'smoothing':    0.1,
+        'beam_size':    5,
         'patience':     2,
+        'data_limit':   None,
         'batch_size':   32,
         'max_len':      128
     }
@@ -581,4 +571,4 @@ if __name__ == '__main__':
     elif 'score' in args.subcommands:
         score_model(args.data, args.vocab, args.load, args.out, args.langs[1], config)
     elif 'input' in args.subcommands:
-        print(translate(args.string, args.vocab, args.codes, args.load, *args.langs))
+        print(translate(args.string, args.vocab, args.codes, args.load, *args.langs, config))

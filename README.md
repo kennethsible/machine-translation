@@ -1,60 +1,58 @@
 # Neural Machine Translation System
+**Ken Sible | University of Notre Dame | [NLP Group](https://nlp.nd.edu)**
 
 ```
-usage: translate.py [-h] [--seed SEED] {train,score,input} ...
+usage: main.py [-h] [--seed SEED] {train,score} ...
 
 optional arguments:
-  -h, --help          show this help message and exit
-  --seed SEED         random seed
+  -h, --help     show this help message and exit
+  --seed SEED    random seed
 
 subcommands:
-  {train,score,eval}
-    train             train model
-    score             score model
-    input             translate input
+  {train,score}
+    train        train model
+    score        score model
 ```
+
+`usage: preprocess.sh <src_lang> <tgt_lang>`
 
 ## Train Model
 ```
-usage: translate.py train [-h] --data FILE --val FILE --langs LANG LANG
-                          --vocab FILE [--save FILE]
+usage: main.py train [-h] --data FILE --val FILE --langs LANG LANG --vocab FILE [--save FILE]
 
 optional arguments:
   -h, --help         show this help message and exit
   --data FILE        training data
   --val FILE         validation data
   --langs LANG LANG  source/target language
-  --vocab FILE       model vocabulary
+  --vocab FILE       vocab file
   --save FILE        save state_dict
 ```
 
 ## Score Model
 ```
-usage: translate.py score [-h] --data FILE --langs LANG LANG --vocab FILE
-                          --load FILE --out FILE
+usage: main.py score [-h] --data FILE --langs LANG LANG --vocab FILE --load FILE --save FILE
 
 optional arguments:
   -h, --help         show this help message and exit
   --data FILE        test data
   --langs LANG LANG  source/target language
-  --vocab FILE       model vocabulary
+  --vocab FILE       vocab file
   --load FILE        load state_dict
-  --out FILE         save score/output
+  --save FILE         save output
 ```
 
 ## Translate Input
 ```
-usage: translate.py input [-h] --langs LANG LANG --vocab FILE --codes FILE
-                          --load FILE
-                          string
+usage: translate.py [-h] --langs LANG LANG --vocab FILE --codes FILE --load FILE INPUT
 
 positional arguments:
-  string             input string
+  INPUT              string (source language)
 
 optional arguments:
   -h, --help         show this help message and exit
   --langs LANG LANG  source/target language
-  --vocab FILE       model vocabulary
-  --codes FILE       BPE codes file
+  --vocab FILE       vocab file
+  --codes FILE       codes file
   --load FILE        load state_dict
 ```

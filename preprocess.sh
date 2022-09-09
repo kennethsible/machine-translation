@@ -33,55 +33,50 @@ END
 )"
     echo "$output\n"
 }
-sgm_to_txt "data/dev/dev.$src_lang.sgm" > "data/dev/dev.$src_lang"
-sgm_to_txt "data/dev/dev.$tgt_lang.sgm" > "data/dev/dev.$tgt_lang"
-sgm_to_txt "data/test/test.$src_lang.sgm" > "data/test/test.$src_lang"
-sgm_to_txt "data/test/test.$tgt_lang.sgm" > "data/test/test.$tgt_lang"
+for path in "data/dev/dev" "data/test/test"
+do
+    sgm_to_txt "$path.$src_lang.sgm" > "$path.$src_lang"
+    sgm_to_txt "$path.$tgt_lang.sgm" > "$path.$tgt_lang"
+done
 rm data/dev/*.sgm data/test/*.sgm
 
 echo -e "\nPerforming Tokenization with Moses..."
-sacremoses -l $src_lang -j 4 tokenize < "data/train/train.$src_lang" > "data/train/train.tok.$src_lang"
-sacremoses -l $tgt_lang -j 4 tokenize < "data/train/train.$tgt_lang" > "data/train/train.tok.$tgt_lang"
-sacremoses -l $src_lang -j 4 tokenize < "data/dev/dev.$src_lang" > "data/dev/dev.tok.$src_lang"
-sacremoses -l $tgt_lang -j 4 tokenize < "data/dev/dev.$tgt_lang" > "data/dev/dev.tok.$tgt_lang"
-sacremoses -l $src_lang -j 4 tokenize < "data/test/test.$src_lang" > "data/test/test.tok.$src_lang"
-sacremoses -l $tgt_lang -j 4 tokenize < "data/test/test.$tgt_lang" > "data/test/test.tok.$tgt_lang"
+for path in "data/train/train" "data/dev/dev" "data/test/test"
+do
+    sacremoses -l $src_lang -j 4 tokenize < "$path.$src_lang" > "$path.tok.$src_lang"
+    sacremoses -l $tgt_lang -j 4 tokenize < "$path.$tgt_lang" > "$path.tok.$tgt_lang"
+done
 
 echo -e "\nPerforming Tokenization with BPE..."
-cat "data/train/train.tok.$src_lang" "data/train/train.tok.$tgt_lang" | subword-nmt learn-bpe -s 32000 -o "data/codes.$src_lang$tgt_lang"
+cat "data/train/train.tok.$src_lang" "data/train/train.tok.$tgt_lang" \
+    | subword-nmt learn-bpe -s 32000 -o "data/codes.$src_lang$tgt_lang"
 ln -s "codes.$src_lang$tgt_lang" "data/codes.$tgt_lang$src_lang"
-subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "data/train/train.tok.$src_lang" > "data/train/train.tok.bpe.$src_lang"
-subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "data/train/train.tok.$tgt_lang" > "data/train/train.tok.bpe.$tgt_lang"
-subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "data/dev/dev.tok.$src_lang" > "data/dev/dev.tok.bpe.$src_lang"
-subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "data/dev/dev.tok.$tgt_lang" > "data/dev/dev.tok.bpe.$tgt_lang"
-subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "data/test/test.tok.$src_lang" > "data/test/test.tok.bpe.$src_lang"
-subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "data/test/test.tok.$tgt_lang" > "data/test/test.tok.bpe.$tgt_lang"
+for path in "data/train/train" "data/dev/dev" "data/test/test"
+do
+    subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "$path.tok.$src_lang" > "$path.tok.bpe.$src_lang"
+    subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "$path.tok.$tgt_lang" > "$path.tok.bpe.$tgt_lang"
+done
 
 echo -e "\nExtracting Shared Vocab with BPE..."
-cat "data/train/train.tok.bpe.$src_lang" "data/train/train.tok.bpe.$tgt_lang" | subword-nmt get-vocab > "data/vocab.$src_lang$tgt_lang"
+cat "data/train/train.tok.bpe.$src_lang" "data/train/train.tok.bpe.$tgt_lang" \
+    | subword-nmt get-vocab > "data/vocab.$src_lang$tgt_lang"
 ln -s "vocab.$src_lang$tgt_lang" "data/vocab.$tgt_lang$src_lang"
 wc -l "data/vocab.$src_lang$tgt_lang"
 
 echo -e "\nCombining Source and Target Data..."
-paste "data/train/train.tok.bpe.$src_lang" "data/train/train.tok.bpe.$tgt_lang" > "data/train/train.tok.bpe.$src_lang$tgt_lang"
-paste "data/train/train.tok.bpe.$tgt_lang" "data/train/train.tok.bpe.$src_lang" > "data/train/train.tok.bpe.$tgt_lang$src_lang"
-wc -l "data/train/train.tok.bpe.$src_lang$tgt_lang"
-paste "data/dev/dev.tok.bpe.$src_lang" "data/dev/dev.tok.bpe.$tgt_lang" > "data/dev/dev.tok.bpe.$src_lang$tgt_lang"
-paste "data/dev/dev.tok.bpe.$tgt_lang" "data/dev/dev.tok.bpe.$src_lang" > "data/dev/dev.tok.bpe.$tgt_lang$src_lang"
-wc -l "data/dev/dev.tok.bpe.$src_lang$tgt_lang"
-paste "data/test/test.tok.bpe.$src_lang" "data/test/test.tok.bpe.$tgt_lang" > "data/test/test.tok.bpe.$src_lang$tgt_lang"
-paste "data/test/test.tok.bpe.$tgt_lang" "data/test/test.tok.bpe.$src_lang" > "data/test/test.tok.bpe.$tgt_lang$src_lang"
-wc -l "data/test/test.tok.bpe.$src_lang$tgt_lang"
+for path in "data/train/train" "data/dev/dev" "data/test/test"
+do
+    paste "$path.tok.bpe.$src_lang" "$path.tok.bpe.$tgt_lang" > "$path.tok.bpe.$src_lang$tgt_lang"
+    paste "$path.tok.bpe.$tgt_lang" "$path.tok.bpe.$src_lang" > "$path.tok.bpe.$tgt_lang$src_lang"
+    wc -l "$path.tok.bpe.$src_lang$tgt_lang"
+done
 
 echo -e "\nCleaning Train/Dev/Test Data..."
-awk -i inplace '!seen[$0]++' "data/train/train.tok.bpe.$src_lang$tgt_lang"
-awk -i inplace '!seen[$0]++' "data/train/train.tok.bpe.$tgt_lang$src_lang"
-wc -l "data/train/train.tok.bpe.$src_lang$tgt_lang"
-awk -i inplace '!seen[$0]++' "data/dev/dev.tok.bpe.$src_lang$tgt_lang"
-awk -i inplace '!seen[$0]++' "data/dev/dev.tok.bpe.$tgt_lang$src_lang"
-wc -l "data/dev/dev.tok.bpe.$src_lang$tgt_lang"
-awk -i inplace '!seen[$0]++' "data/test/test.tok.bpe.$src_lang$tgt_lang"
-awk -i inplace '!seen[$0]++' "data/test/test.tok.bpe.$tgt_lang$src_lang"
-wc -l "data/test/test.tok.bpe.$src_lang$tgt_lang"
+for path in "data/train/train" "data/dev/dev" "data/test/test"
+do
+    awk -i inplace '!seen[$0]++' "$path.tok.bpe.$src_lang$tgt_lang"
+    awk -i inplace '!seen[$0]++' "$path.tok.bpe.$tgt_lang$src_lang"
+    wc -l "$path.tok.bpe.$src_lang$tgt_lang"
+done
 
 echo -e "\nDone."

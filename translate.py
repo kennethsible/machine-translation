@@ -350,31 +350,39 @@ def greedy_search(model, memory, src_mask=None, max_len=256, start_word=0, end_w
     return path.squeeze(0)[1:]
 
 def beam_search(model, memory, beam_size, src_mask=None, max_len=256, start_word=0, end_word=1):
-    probs = torch.zeros(beam_size, device=device)
-    paths = torch.full((beam_size, max_len + 1), start_word, device=device)
+    probs = torch.zeros(1, device=device)
+    paths = torch.full((1, max_len + 1), start_word, device=device)
+    finished = torch.zeros(1, dtype=torch.bool, device=device)
 
-    complete = [] # TODO Length Normalization
     for i in range(1, max_len + 1):
-        logits = model.decode(memory.expand(beam_size, -1, -1),
-            src_mask, paths[:, :i], subsequent_mask(i))
-        lprobs = model.generator(logits[:, -1])
+        logits = model.decode(memory.expand((~finished).count_nonzero(), -1, -1),
+            src_mask, paths[~finished, :i], subsequent_mask(i))
+        scores = probs[~finished].unsqueeze(1) + model.generator(logits[:, -1])
+        if i == 1: # increase capacity to beam_size
+            probs = probs.repeat(beam_size)
+            paths = paths.repeat(beam_size, 1)
+            finished = finished.repeat(beam_size)
 
-        hypotheses = torch.add(probs.unsqueeze(1), lprobs).flatten()
-        topv, topi = torch.topk(hypotheses, beam_size)
-        probs, paths = topv, paths[torch.trunc(topi / model.vocab_size).long()]
-        paths[:, i] = torch.remainder(topi, model.vocab_size)
+        candidates = paths[~finished]
+        topv, topi = torch.topk(scores.flatten(), beam_size)
+        if any(finished): # length normalization
+            for j in range(beam_size):
+                finished[finished.nonzero(as_tuple=True)] ^= probs[finished] < (topv[j] / i)
+            if (~finished).count_nonzero() > beam_size:
+                beam_size = (~finished).sum()
+                topv, topi = torch.topk(scores.flatten(), beam_size)
 
-        finished = paths[:, i] == end_word
-        complete.extend(zip(probs[finished], paths[finished, :i]))
-        probs, paths = probs[~finished], paths[~finished]
-        if paths.size(0) < beam_size:
-            beam_size = paths.size(0)
-        if beam_size == 0: break
+        probs[~finished] = topv
+        paths[~finished] = candidates[topi // model.vocab_size]
+        paths[~finished, i] = topi % model.vocab_size
 
-    if paths.size(0) > 0:
-        complete.extend(zip(probs, paths))
-    complete.sort(key=lambda state: -state[0])
-    return [path[1:] for _, path in complete]
+        finished |= paths[:, i] == end_word
+        beam_size = (~finished).count_nonzero()
+        probs[paths[:, i] == end_word] /= i
+        if all(finished): break
+
+    best_path = paths[probs.argmax()]
+    return best_path[1:(best_path == end_word).nonzero()]
 
 def train_model(train_file, val_file, vocab_file, model_file, tgt_lang, config):
     train_data, val_data = [], []
@@ -439,7 +447,7 @@ def train_model(train_file, val_file, vocab_file, model_file, tgt_lang, config):
 
                     memory = model.encode(batch.src_nums, batch.src_mask)
                     model_out = greedy_search(model, memory, batch.src_mask) if config['beam_size'] is None \
-                        else beam_search(model, memory, config['beam_size'], batch.src_mask)[0]
+                        else beam_search(model, memory, config['beam_size'], batch.src_mask)
                     reference.append(detokenize([vocab.denumberize(x)
                         for x in batch.tgt_nums[0] if x != vocab.padding_idx], tgt_lang))
                     candidate.append(detokenize(vocab.denumberize(*model_out), tgt_lang))
@@ -486,7 +494,7 @@ def score_model(test_file, vocab_file, model_file, out_file, tgt_lang, config):
 
             memory = model.encode(batch.src_nums, batch.src_mask)
             model_out = greedy_search(model, memory, batch.src_mask) if config['beam_size'] is None \
-                else beam_search(model, memory, config['beam_size'], batch.src_mask)[0]
+                else beam_search(model, memory, config['beam_size'], batch.src_mask)
             reference.append(detokenize([vocab.denumberize(x)
                 for x in batch.tgt_nums[0] if x != vocab.padding_idx], tgt_lang))
             candidate.append(detokenize(vocab.denumberize(*model_out), tgt_lang))
@@ -520,7 +528,7 @@ def translate(input, vocab_file, codes_file, model_file, src_lang, tgt_lang, con
         src_nums = vocab.numberize(*words).unsqueeze(0)
         memory = model.encode(src_nums, src_mask=None)
         model_out = greedy_search(model, memory) if config['beam_size'] is None \
-            else beam_search(model, memory, config['beam_size'])[0]
+            else beam_search(model, memory, config['beam_size'])
     return detokenize(vocab.denumberize(*model_out), tgt_lang)
 
 if __name__ == '__main__':

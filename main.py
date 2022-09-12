@@ -162,28 +162,46 @@ if __name__ == '__main__':
     subparsers = parser.add_subparsers(title='subcommands', dest='subcommands')
 
     train_parser = subparsers.add_parser('train', help='train model')
-    train_parser.add_argument('--data', metavar='FILE', required=True, type=str, help='training data')
-    train_parser.add_argument('--val', metavar='FILE', required=True, type=str, help='validation data')
-    train_parser.add_argument('--langs', nargs=2, metavar='LANG', required=True, type=str, help='source/target language')
-    train_parser.add_argument('--vocab', metavar='FILE', required=True, type=str, help='vocab file')
-    train_parser.add_argument('--save', metavar='FILE', type=str, help='save state_dict')
+    train_parser.add_argument('--lang', nargs=2, metavar='LANG', required=True, help='source/target language')
+    train_parser.add_argument('--data', nargs=2, metavar='FILE', help='training/validation data')
+    train_parser.add_argument('--vocab', metavar='FILE', help='vocab (from BPE)')
+    train_parser.add_argument('--config', metavar='FILE', default='config.json', help='model config')
+    train_parser.add_argument('--save', metavar='FILE', help='save state_dict')
 
     score_parser = subparsers.add_parser('score', help='score model')
-    score_parser.add_argument('--data', metavar='FILE', required=True, type=str, help='test data')
-    score_parser.add_argument('--langs', nargs=2, metavar='LANG', required=True, type=str, help='source/target language')
-    score_parser.add_argument('--vocab', metavar='FILE', required=True, type=str, help='vocab file')
-    score_parser.add_argument('--load', metavar='FILE', required=True, type=str, help='load state_dict')
-    score_parser.add_argument('--save', metavar='FILE', required=True, type=str, help='save output')
+    score_parser.add_argument('--lang', nargs=2, metavar='LANG', required=True, help='source/target language')
+    score_parser.add_argument('--data', metavar='FILE', help='testing data')
+    score_parser.add_argument('--vocab', metavar='FILE', help='vocab (from BPE)')
+    score_parser.add_argument('--config', metavar='FILE', default='config.json', help='model config')
+    score_parser.add_argument('--load', metavar='FILE', help='load state_dict')
+    score_parser.add_argument('--out', metavar='FILE', default='test.out', help='store output')
     args = parser.parse_args()
 
     if args.seed:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
 
-    with open('config.json', 'r') as file:
+    src_lang, tgt_lang = args.lang
+    if not args.vocab:
+        args.vocab = f'data/vocab.{src_lang}{tgt_lang}'
+
+    with open(args.config, 'r') as file:
         config = json.load(file)
 
     if 'train' in args.subcommands:
-        train_model(args.data, args.val, args.vocab, args.save, args.langs[1], config)
+        if not args.data:
+            args.data = (
+                f'data/training/train.tok.bpe.{src_lang}{tgt_lang}',
+                f'data/validation/val.tok.bpe.{src_lang}{tgt_lang}'
+            )
+        if not args.save:
+            args.save = f'model.{src_lang}{tgt_lang}'
+        train_model(*args.data, args.vocab, args.save, tgt_lang, config)
     elif 'score' in args.subcommands:
-        score_model(args.data, args.vocab, args.load, args.save, args.langs[1], config)
+        if not args.data:
+            args.data = f'data/testing/test.tok.bpe.{src_lang}{tgt_lang}'
+        if not args.load:
+            args.load = f'model.{src_lang}{tgt_lang}'
+        if not args.out:
+            args.out =  f'test.out'
+        score_model(args.data, args.vocab, args.load, args.out, tgt_lang, config)

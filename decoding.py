@@ -14,18 +14,18 @@ def greedy_search(model, memory, src_mask=None, max_len=256, start_word=0, end_w
     return path.squeeze(0)[1:]
 
 def beam_search(model, memory, beam_size, src_mask=None, max_len=256, start_word=0, end_word=1):
-    probs = torch.zeros(1, device=device)
-    paths = torch.full((1, max_len + 1), start_word, device=device)
     finished = torch.zeros(1, dtype=torch.bool, device=device)
+    paths = torch.full((1, max_len + 1), start_word, device=device)
+    probs = torch.zeros(1, device=device)
 
     for i in range(1, max_len + 1):
         logits = model.decode(memory.expand((~finished).count_nonzero(), -1, -1),
             src_mask, paths[~finished, :i], subsequent_mask(i))
         scores = probs[~finished].unsqueeze(1) + model.generator(logits[:, -1])
         if i == 1: # increase capacity to beam_size
-            probs = probs.repeat(beam_size)
-            paths = paths.repeat(beam_size, 1)
             finished = finished.repeat(beam_size)
+            paths = paths.repeat(beam_size, 1)
+            probs = probs.repeat(beam_size)
 
         candidates = paths[~finished]
         topv, topi = torch.topk(scores.flatten(), beam_size)
@@ -36,9 +36,11 @@ def beam_search(model, memory, beam_size, src_mask=None, max_len=256, start_word
                 beam_size = (~finished).sum()
                 topv, topi = torch.topk(scores.flatten(), beam_size)
 
-        probs[~finished] = topv
-        paths[~finished] = candidates[topi // model.vocab_size]
+        paths[~finished] = candidates[
+            torch.div(topi, model.vocab_size, rounding_mode='trunc')
+        ]
         paths[~finished, i] = topi % model.vocab_size
+        probs[~finished] = topv
 
         finished |= paths[:, i] == end_word
         beam_size = (~finished).count_nonzero()
@@ -46,4 +48,5 @@ def beam_search(model, memory, beam_size, src_mask=None, max_len=256, start_word
         if all(finished): break
 
     best_path = paths[probs.argmax()]
-    return best_path[1:(best_path == end_word).nonzero()]
+    end_index = (best_path == end_word).nonzero()
+    return best_path[1:end_index] if end_index.numel() else best_path[1:]

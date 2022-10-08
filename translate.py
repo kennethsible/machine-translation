@@ -1,11 +1,9 @@
 from sacremoses import MosesTokenizer, MosesDetokenizer
-from decoding import greedy_search, beam_search
+from decoding import beam_search
 from subword_nmt.apply_bpe import BPE
-from manager import Vocab
+from manager import device, Vocab
 from model import Model
 import torch, json, re
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def tokenize(input, src_lang):
     return MosesTokenizer(src_lang).tokenize(input, return_str=True)
@@ -17,12 +15,14 @@ def detokenize(output, tgt_lang):
 def translate(input, vocab_file, codes_file, model_file, src_lang, tgt_lang, config):
     with open(codes_file) as file:
         input = BPE(file).process_line(tokenize(input, src_lang))
-    words = ['<BOS>'] + input.split() + ['<EOS>']
+    words = ['<BOS>'] + input.split()
+    assert len(input) > 0
 
     vocab = Vocab()
     with open(vocab_file) as file:
         for line in file:
             vocab.add(line.split()[0])
+    assert vocab.size() > 0
 
     model = Model(vocab.size()).to(device)
     model.load_state_dict(torch.load(model_file, map_location=device))
@@ -30,9 +30,8 @@ def translate(input, vocab_file, codes_file, model_file, src_lang, tgt_lang, con
 
     with torch.no_grad():
         src_nums = vocab.numberize(*words).unsqueeze(0)
-        memory = model.encode(src_nums, src_mask=None)
-        model_out = greedy_search(model, memory) if config['beam_size'] is None \
-            else beam_search(model, memory, config['beam_size'])
+        memory = model.encode(src_nums.to(device), None)
+        model_out = beam_search(model, memory, config['beam_size'])
     return detokenize(vocab.denumberize(*model_out), tgt_lang)
 
 if __name__ == '__main__':

@@ -19,7 +19,7 @@ subcommands:
 
 ## Train Model
 ```
-usage: main.py train [-h] --lang LANG LANG [--data FILE FILE] [--vocab FILE] [--config FILE] [--save FILE]
+usage: main.py train [-h] --lang LANG LANG [--data FILE FILE] [--vocab FILE] [--config FILE] [--save FILE] [--out FILE]
 
 optional arguments:
   -h, --help        show this help message and exit
@@ -28,6 +28,7 @@ optional arguments:
   --vocab FILE      vocab (from BPE)
   --config FILE     model config
   --save FILE       save state_dict
+  --out FILE        store log file
 ```
 
 ## Score Model

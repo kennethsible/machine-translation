@@ -1,9 +1,7 @@
-from layers import clone, Embedding, PositionalEncoding, \
+from layers import Embedding, PositionalEncoding, \
     LogSoftmax, ScaleNorm, FeedForward, MultiHeadAttention
-from torch import nn
-import torch
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+from manager import clone
+import torch, torch.nn as nn
 
 class EarlyStopping:
 
@@ -58,7 +56,7 @@ class DecoderLayer(nn.Module):
 
     def __init__(self, d_model, d_ff, n_heads, dropout):
         super(DecoderLayer, self).__init__()
-        self.self_att  = MultiHeadAttention(n_heads, d_model)
+        self.self_att = MultiHeadAttention(n_heads, d_model)
         self.cross_att = MultiHeadAttention(n_heads, d_model)
         self.ff = FeedForward(d_model, d_ff, dropout)
         scale = torch.tensor(d_model, dtype=torch.float32)

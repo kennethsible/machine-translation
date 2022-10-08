@@ -1,6 +1,9 @@
-import torch
+import copy, torch, torch.nn as nn
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+def clone(module, N):
+    return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
 class Vocab:
 
@@ -23,7 +26,7 @@ class Vocab:
 
     def numberize(self, *words):
         nums = torch.tensor([self.word_to_num[word] if word in self.word_to_num
-            else self.word_to_num['<UNK>'] for word in words], device=device)
+            else self.word_to_num['<UNK>'] for word in words])
         return nums[0] if len(nums) == 1 else nums
 
     def denumberize(self, *nums):
@@ -33,44 +36,77 @@ class Vocab:
     def size(self):
         return len(self.num_to_word)
 
-def subsequent_mask(size):
-    mask = torch.ones((1, size, size), device=device)
-    return torch.triu(mask, diagonal=1) == 0
-
 class Batch:
 
     def __init__(self, src_nums, tgt_nums, padding_idx):
-        self.src_nums = src_nums
-        self.tgt_nums = tgt_nums
-        self.src_mask = (self.src_nums != padding_idx).unsqueeze(-2)
-        self.tgt_mask = (self.tgt_nums != padding_idx).unsqueeze(-2)
-        self.n_tokens = self.tgt_mask.detach().sum()
-        self.tgt_mask = self.tgt_mask & subsequent_mask(self.tgt_nums.size(-1))
+        self._src_nums = src_nums if src_nums.dim() > 1 else src_nums.unsqueeze(0)
+        self._tgt_nums = tgt_nums if tgt_nums.dim() > 1 else tgt_nums.unsqueeze(0)
 
-def load_data(data_file, data_limit=None, batch_size=None, max_len=None):
-        data = []
+        self._tgt_mask = (self._tgt_nums[:, :-1] != padding_idx).unsqueeze(-2)
+        self._n_tokens = self._tgt_mask.sum()
+
+        self._src_mask = (self._src_nums != padding_idx).unsqueeze(-2)
+        self._tgt_mask = self._tgt_mask & triu_mask(self._tgt_nums[:, :-1].size(-1), self._tgt_mask.device)
+
+    @property
+    def src_nums(self):
+        return self._src_nums.to(device)
+
+    @property
+    def tgt_nums(self):
+        return self._tgt_nums.to(device)
+
+    @property
+    def src_mask(self):
+        return self._src_mask.to(device)
+
+    @property
+    def tgt_mask(self):
+        return self._tgt_mask.to(device)
+
+    @property
+    def n_tokens(self):
+        return self._n_tokens.item()
+
+    def size(self):
+        return self._src_nums.size(0)
+
+def triu_mask(size, device=None):
+    mask = torch.ones((1, size, size), device=device)
+    return torch.triu(mask, diagonal=1) == 0
+
+def load_data(data_file, vocab, data_limit=None, max_len=None, batch_size=None):
+        unbatched = []
         with open(data_file) as file:
             for line in file:
-                if data_limit and len(data) > data_limit: break
+                if data_limit and len(unbatched) > data_limit: break
                 src_line, tgt_line = line.split('\t')
-                src_words = ['<BOS>'] + src_line.split() + ['<EOS>']
-                tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
-                if not max_len or 2 < len(src_words) <= max_len and 2 < len(tgt_words) <= max_len:
-                    data.append((src_words, tgt_words))
-        data.sort(key=lambda x: len(x[0]))
-        if batch_size is None: return data
+                src_words, tgt_words = src_line.split(), tgt_line.split()
+
+                if len(src_words) <= 1 or len(tgt_words) <= 1: continue
+                if max_len and len(src_words) > max_len:
+                    src_words = src_words[:max_len]
+                if max_len and len(tgt_words) > max_len:
+                    tgt_words = tgt_words[:max_len]
+                tgt_words = ['<BOS>'] + tgt_words + ['<EOS>']
+
+                unbatched.append((vocab.numberize(*src_words), vocab.numberize(*tgt_words)))
+        if not batch_size:
+            return unbatched
 
         batched = []
-        for i in range(batch_size, len(data) + 1, batch_size):
-            batch = data[(i - batch_size):i]
-            src_max_len = max(len(src_words) for src_words, _ in batch)
-            tgt_max_len = max(len(tgt_words) for _, tgt_words in batch)
-            for src_words, tgt_words in batch:
-                src_res = src_max_len - len(src_words)
-                tgt_res = tgt_max_len - len(tgt_words)
-                if src_res > 0:
-                    src_words.extend(src_res * ['<PAD>'])
-                if tgt_res > 0:
-                    tgt_words.extend(tgt_res * ['<PAD>'])
-            batched.append(batch)
+        unbatched.sort(key=lambda x: x[0].size(0))
+        for i in range(0, len(unbatched), batch_size):
+            src_batch, tgt_batch = zip(*unbatched[i:(i + batch_size)])
+            src_len = max(src_nums.size(0) for src_nums in src_batch)
+            tgt_len = max(tgt_nums.size(0) for tgt_nums in tgt_batch)
+
+            src_nums = torch.stack([
+                nn.functional.pad(src_nums, (0, src_len - len(src_nums)), value=vocab.padding_idx) for src_nums in src_batch
+            ])
+            tgt_nums = torch.stack([
+                nn.functional.pad(tgt_nums, (0, tgt_len - len(tgt_nums)), value=vocab.padding_idx) for tgt_nums in src_batch
+            ])
+
+            batched.append(Batch(src_nums, tgt_nums, vocab.padding_idx))
         return batched

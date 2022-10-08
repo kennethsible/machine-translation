@@ -1,10 +1,5 @@
-from torch import nn
-import torch, math, copy
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-def clone(module, N):
-    return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
+from manager import clone
+import math, torch, torch.nn as nn
 
 class Linear(nn.Module):
 

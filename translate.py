@@ -15,7 +15,6 @@ def detokenize(output, tgt_lang):
 def translate(input, vocab_file, codes_file, model_file, src_lang, tgt_lang, config):
     with open(codes_file) as file:
         input = BPE(file).process_line(tokenize(input, src_lang))
-    words = ['<BOS>'] + input.split()
     assert len(input) > 0
 
     vocab = Vocab()
@@ -29,10 +28,11 @@ def translate(input, vocab_file, codes_file, model_file, src_lang, tgt_lang, con
     model.eval()
 
     with torch.no_grad():
+        words = ['<BOS>'] + input.split() + ['<EOS>']
         src_nums = vocab.numberize(*words).unsqueeze(0)
         memory = model.encode(src_nums.to(device), None)
-        model_out = beam_search(model, memory, config['beam_size'])
-    return detokenize(vocab.denumberize(*model_out), tgt_lang)
+        out = beam_search(model, memory, config['beam_size'])
+    return detokenize(vocab.denumberize(*out), tgt_lang)
 
 if __name__ == '__main__':
     import argparse

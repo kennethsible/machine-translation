@@ -31,7 +31,7 @@ def train_model(train_file, val_file, vocab_file, model_file, log_file, tgt_lang
 
     train_data, val_data = [], []
     for data, data_file in ((train_data, train_file), (val_data, val_file)):
-        data[:] = load_data(data_file, vocab, config['data_limit'], config['max_len'], config['batch_size'])
+        data[:] = load_data(data_file, vocab, config['batch_size'], config['max_len'])
     assert len(train_data) > 0 and len(val_data) > 0
 
     model = Model(vocab.size()).to(device)
@@ -71,7 +71,7 @@ def train_model(train_file, val_file, vocab_file, model_file, log_file, tgt_lang
             print(output, flush=True)
             file.write(output + f' | Train Time: {elapsed}\n')
 
-        _, bleu_score, chrf_score = score_model(val_data, vocab, model, log_file, tgt_lang, config)
+        _, bleu_score, _ = score_model(val_data, vocab, model, log_file, tgt_lang, config)
 
         with open(log_file, 'a') as file:
             if bleu_score.score > best_score:
@@ -98,14 +98,14 @@ def score_model(test_file, vocab_file, model_file, out_file, tgt_lang, config):
         assert vocab.size() > 0
 
     if isinstance(test_file, list):
-        test_data = test_file
-        unbatched = []
-        for batch in test_data:
+        test_data = []
+        for batch in test_file:
             for i in range(batch.size()):
-                unbatched.append((batch.src_nums[i], batch.tgt_nums[i]))
-        test_data = unbatched
+                src_nums = batch.src_nums[i]
+                tgt_nums = batch.tgt_nums[i]
+                test_data.append(Batch(src_nums, tgt_nums, vocab.padding_idx))
     else:
-        test_data = load_data(test_file, vocab, config['data_limit'])
+        test_data = load_data(test_file, vocab)
         assert len(test_data) > 0
 
     if isinstance(model_file, Model):
@@ -118,14 +118,13 @@ def score_model(test_file, vocab_file, model_file, out_file, tgt_lang, config):
     start = time.time()
     candidate, reference = [], []
     with torch.no_grad():
-        for src_nums, tgt_nums in test_data:
-            batch = Batch(src_nums, tgt_nums, vocab.padding_idx)
+        for batch in test_data:
             memory = model.encode(batch.src_nums, batch.src_mask)
-            model_out = beam_search(model, memory, config['beam_size'], batch.src_mask)
+            out = beam_search(model, memory, config['beam_size'], batch.src_mask)
 
             reference.append(detokenize([vocab.denumberize(x)
                 for x in batch.tgt_nums[0] if x != vocab.padding_idx], tgt_lang))
-            candidate.append(detokenize(vocab.denumberize(*model_out), tgt_lang))
+            candidate.append(detokenize(vocab.denumberize(*out), tgt_lang))
 
     bleu_score = bleu.corpus_score(candidate, [reference])
     chrf_score = chrf.corpus_score(candidate, [reference])

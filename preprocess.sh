@@ -1,55 +1,27 @@
 #!/bin/bash
 
-commoncrawl=0
-europarl_v7=0
 merge_ops=$2
 src_lang=$3
 tgt_lang=$4
 
-while getopts ":ce" opt; do
-   case $opt in
-      c) commoncrawl=1;;
-      e) europarl_v7=1;;
-   esac
-done
-
-usage="usage: preprocess.sh [-ce] MERGE_OPS SRC_LANG TGT_LANG"
-if [ $commoncrawl -eq 0 ] && [ $europarl_v7 -eq 0 ]; then
-    echo -e "missing training corpora (-c for Common Crawl, -e for Europarl v7)\n$usage"
-    exit 1
-fi
+usage="usage: preprocess.sh MERGE_OPS SRC_LANG TGT_LANG"
 if [ -z "$merge_ops" ] || [ -z "$src_lang" ] || [ -z "$tgt_lang" ]; then
     echo -e "missing positional argument(s)\n$usage"
     exit 1
 fi
 
-mkdir -p data data/training data/validation data/testing
+mkdir -p data data/training data/validation data/testing data/output
 
 echo "Downloading WMT16 Training Corpora..."
 for path in "data/training"; do
     touch "$path/train.$src_lang" "$path/train.$tgt_lang"
-
-    if [ $commoncrawl -eq 1 ]; then
-        wget -q -O data/commoncrawl.tgz "https://www.statmt.org/wmt13/training-parallel-commoncrawl.tgz" --show-progress
-        tar -xzf data/commoncrawl.tgz -C data && rm data/commoncrawl.tgz
-        find data -type f ! -name "*$src_lang-$tgt_lang*" -delete
-        rm data/*.annotation
-        mv "data/commoncrawl.$src_lang-$tgt_lang.$src_lang" "$path/commoncrawl.$src_lang"
-        mv "data/commoncrawl.$src_lang-$tgt_lang.$tgt_lang" "$path/commoncrawl.$tgt_lang"
-        cat "$path/commoncrawl.$src_lang" >> "$path/train.$src_lang"
-        cat "$path/commoncrawl.$tgt_lang" >> "$path/train.$tgt_lang"
-        rm "$path/commoncrawl.$src_lang" "$path/commoncrawl.$tgt_lang"
-    fi
-
-    if [ $europarl_v7 -eq 1 ]; then
-        wget -q -O data/europarl_v7.tgz "http://www.statmt.org/europarl/v7/$src_lang-$tgt_lang.tgz" --show-progress
-        tar -xzf data/europarl_v7.tgz -C data && rm data/europarl_v7.tgz
-        mv "data/europarl-v7.$src_lang-$tgt_lang.$src_lang" "$path/europarl_v7.$src_lang"
-        mv "data/europarl-v7.$src_lang-$tgt_lang.$tgt_lang" "$path/europarl_v7.$tgt_lang"
-        cat "$path/europarl_v7.$src_lang" >> "$path/train.$src_lang"
-        cat "$path/europarl_v7.$tgt_lang" >> "$path/train.$tgt_lang"
-        rm "$path/europarl_v7.$src_lang" "$path/europarl_v7.$tgt_lang"
-    fi
+    wget -q -O data/europarl_v7.tgz "http://www.statmt.org/europarl/v7/$src_lang-$tgt_lang.tgz" --show-progress
+    tar -xzf data/europarl_v7.tgz -C data && rm data/europarl_v7.tgz
+    mv "data/europarl-v7.$src_lang-$tgt_lang.$src_lang" "$path/europarl_v7.$src_lang"
+    mv "data/europarl-v7.$src_lang-$tgt_lang.$tgt_lang" "$path/europarl_v7.$tgt_lang"
+    cat "$path/europarl_v7.$src_lang" >> "$path/train.$src_lang"
+    cat "$path/europarl_v7.$tgt_lang" >> "$path/train.$tgt_lang"
+    rm "$path/europarl_v7.$src_lang" "$path/europarl_v7.$tgt_lang"
 done
 
 echo -e "\nDownloading WMT16 Validation Data..."

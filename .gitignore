@@ -1,6 +1,3 @@
 __pycache__/
 *.pyc
 data/
-model.*
-!model.py
-DEBUG.log

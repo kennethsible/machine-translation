@@ -1,9 +1,0 @@
-{
-    "n_epochs":     25,
-    "patience":     2,
-    "lr":           3e-4,
-    "smoothing":    0.1,
-    "batch_size":   32,
-    "max_len":      128,
-    "beam_size":    5
-}

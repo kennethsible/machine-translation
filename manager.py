@@ -25,13 +25,13 @@ class Vocab:
             self.word_to_num.pop(word)
 
     def numberize(self, *words):
-        nums = torch.tensor([self.word_to_num[word] if word in self.word_to_num
-            else self.word_to_num['<UNK>'] for word in words])
-        return nums[0] if len(nums) == 1 else nums
+        return torch.tensor([
+            self.word_to_num[word] if word in self.word_to_num
+                else self.default_idx for word in words
+        ])
 
     def denumberize(self, *nums):
-        words = [self.num_to_word[num] for num in nums]
-        return words[0] if len(words) == 1 else words
+        return [self.num_to_word[num] for num in nums]
 
     def size(self):
         return len(self.num_to_word)
@@ -39,14 +39,12 @@ class Vocab:
 class Batch:
 
     def __init__(self, src_nums, tgt_nums, padding_idx):
-        self._src_nums = src_nums if src_nums.dim() > 1 else src_nums.unsqueeze(0)
-        self._tgt_nums = tgt_nums if tgt_nums.dim() > 1 else tgt_nums.unsqueeze(0)
-
-        self._tgt_mask = (self._tgt_nums[:, :-1] != padding_idx).unsqueeze(-2)
-        self._n_tokens = self._tgt_mask.sum()
-
-        self._src_mask = (self._src_nums != padding_idx).unsqueeze(-2)
-        self._tgt_mask = self._tgt_mask & triu_mask(self._tgt_nums[:, :-1].size(-1), self._tgt_mask.device)
+        self._src_nums = src_nums
+        self._tgt_nums = tgt_nums
+        self._src_mask = (src_nums != padding_idx).unsqueeze(-2)
+        tgt_mask = (tgt_nums[:, :-1] != padding_idx).unsqueeze(-2)
+        self._tgt_mask = tgt_mask & triu_mask(tgt_nums[:, :-1].size(-1))
+        self._n_tokens = (tgt_nums[:, 1:] != padding_idx).sum()
 
     @property
     def src_nums(self):
@@ -75,21 +73,20 @@ def triu_mask(size, device=None):
     mask = torch.ones((1, size, size), device=device)
     return torch.triu(mask, diagonal=1) == 0
 
-def load_data(data_file, vocab, batch_size=None, max_len=None):
+def load_data(data, vocab, batch_size=None, max_length=None):
     unbatched = []
-    with open(data_file) as file:
+    with open(data) as file:
         for line in file:
             src_line, tgt_line = line.split('\t')
             src_words, tgt_words = src_line.split(), tgt_line.split()
+            tgt_words = ['<BOS>'] + tgt_words + ['<EOS>']
 
-            if len(src_words) <= 1 or len(tgt_words) <= 1: continue
-            if max_len and len(src_words) > max_len:
-                src_words = src_words[:max_len]
-            if max_len and len(tgt_words) > max_len:
-                tgt_words = tgt_words[:max_len]
+            if not src_words or not tgt_words: continue
+            if max_length and len(src_words) > max_length:
+                src_words = src_words[:max_length]
+            if max_length and len(tgt_words) > max_length:
+                tgt_words = tgt_words[:max_length]
 
-            for words in (src_words, tgt_words):
-                words[:] = ['<BOS>'] + words + ['<EOS>']
             unbatched.append((src_words, tgt_words))
     unbatched.sort(key=lambda x: len(x[0]))
 
@@ -106,7 +103,7 @@ def load_data(data_file, vocab, batch_size=None, max_len=None):
         ])
         tgt_nums = torch.stack([
             nn.functional.pad(vocab.numberize(*tgt_words), (0, tgt_len - len(tgt_words)),
-                value=vocab.padding_idx) for tgt_words in src_batch
+                value=vocab.padding_idx) for tgt_words in tgt_batch
         ])
 
         batched.append(Batch(src_nums, tgt_nums, vocab.padding_idx))

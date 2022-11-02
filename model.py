@@ -35,8 +35,8 @@ class EncoderLayer(nn.Module):
         scale = torch.tensor(d_model, dtype=torch.float32)
         self.sublayers = clone(SublayerConnection(torch.sqrt(scale), dropout), 2)
 
-    def forward(self, x, mask):
-        x = self.sublayers[0](x, lambda x: self.self_att(x, x, x, mask))
+    def forward(self, x, src_mask):
+        x = self.sublayers[0](x, lambda x: self.self_att(x, x, x, src_mask))
         return self.sublayers[1](x, self.ff)
 
 class Encoder(nn.Module):
@@ -47,9 +47,9 @@ class Encoder(nn.Module):
         scale = torch.tensor(d_model, dtype=torch.float32)
         self.norm = ScaleNorm(torch.sqrt(scale))
 
-    def forward(self, x, mask):
+    def forward(self, x, src_mask):
         for layer in self.layers:
-            x = layer(x, mask)
+            x = layer(x, src_mask)
         return self.norm(x)
 
 class DecoderLayer(nn.Module):
@@ -57,14 +57,14 @@ class DecoderLayer(nn.Module):
     def __init__(self, d_model, d_ff, n_heads, dropout):
         super(DecoderLayer, self).__init__()
         self.self_att = MultiHeadAttention(n_heads, d_model)
-        self.cross_att = MultiHeadAttention(n_heads, d_model)
+        self.crss_att = MultiHeadAttention(n_heads, d_model)
         self.ff = FeedForward(d_model, d_ff, dropout)
         scale = torch.tensor(d_model, dtype=torch.float32)
         self.sublayers = clone(SublayerConnection(torch.sqrt(scale), dropout), 3)
 
     def forward(self, x, m, src_mask, tgt_mask):
         x = self.sublayers[0](x, lambda x: self.self_att(x, x, x, tgt_mask))
-        x = self.sublayers[1](x, lambda x: self.cross_att(x, m, m, src_mask))
+        x = self.sublayers[1](x, lambda x: self.crss_att(x, m, m, src_mask))
         return self.sublayers[2](x, self.ff)
 
 class Decoder(nn.Module):
@@ -75,9 +75,9 @@ class Decoder(nn.Module):
         scale = torch.tensor(d_model, dtype=torch.float32)
         self.norm = ScaleNorm(torch.sqrt(scale))
 
-    def forward(self, x, memory, src_mask, tgt_mask):
+    def forward(self, x, src_encs, src_mask, tgt_mask):
         for layer in self.layers:
-            x = layer(x, memory, src_mask, tgt_mask)
+            x = layer(x, src_encs, src_mask, tgt_mask)
         return self.norm(x)
 
 class Model(nn.Module):
@@ -100,5 +100,5 @@ class Model(nn.Module):
     def encode(self, src_nums, src_mask):
         return self.encoder(self.src_embed(src_nums), src_mask)
 
-    def decode(self, memory, src_mask, tgt_nums, tgt_mask):
-        return self.decoder(self.tgt_embed(tgt_nums), memory, src_mask, tgt_mask)
+    def decode(self, src_encs, src_mask, tgt_nums, tgt_mask):
+        return self.decoder(self.tgt_embed(tgt_nums), src_encs, src_mask, tgt_mask)

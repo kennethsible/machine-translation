@@ -5,10 +5,10 @@ class Linear(nn.Module):
 
     def __init__(self, d_inp, d_out):
         super(Linear, self).__init__()
-        self.weight = torch.nn.Parameter(torch.empty(d_out, d_inp))
-        self.bias = torch.nn.Parameter(torch.empty(d_out))
-        torch.nn.init.normal_(self.weight, std=0.01)
-        torch.nn.init.normal_(self.bias, std=0.01)
+        self.weight = nn.Parameter(torch.empty(d_out, d_inp))
+        self.bias = nn.Parameter(torch.empty(d_out))
+        nn.init.normal_(self.weight, std=0.01)
+        nn.init.normal_(self.bias, std=0.01)
 
     def forward(self, x):
         return x @ self.weight.transpose(0, 1) + self.bias
@@ -17,8 +17,8 @@ class LogSoftmax(nn.Module):
 
     def __init__(self, d_model, vocab):
         super(LogSoftmax, self).__init__()
-        self.weight = torch.nn.Parameter(torch.empty(vocab, d_model))
-        torch.nn.init.normal_(self.weight, std=0.01)
+        self.weight = nn.Parameter(torch.empty(vocab, d_model))
+        nn.init.normal_(self.weight, std=0.01)
 
     def forward(self, x):
         # https://aclanthology.org/N18-1031
@@ -29,8 +29,8 @@ class Embedding(nn.Module):
 
     def __init__(self, d_model, vocab):
         super(Embedding, self).__init__()
-        self.weight = torch.nn.Parameter(torch.empty(vocab, d_model))
-        torch.nn.init.normal_(self.weight, std=0.01)
+        self.weight = nn.Parameter(torch.empty(vocab, d_model))
+        nn.init.normal_(self.weight, std=0.01)
 
     def forward(self, x):
         # https://aclanthology.org/N18-1031

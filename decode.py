@@ -1,26 +1,26 @@
 from manager import device, triu_mask
 import torch
 
-def greedy_search(model, memory, src_mask=None, max_len=256, start_word=0, end_word=1):
+def greedy_search(model, src_encs, src_mask=None, max_len=256, start_word=0, end_word=1):
     path = torch.full((1, 1), start_word, device=device)
     for i in range(1, max_len + 1):
-        logits = model.decode(memory, src_mask, path, triu_mask(i, device=device))
+        logits = model.decode(src_encs, src_mask, path, triu_mask(i, device=device))
         lprobs = model.generator(logits[:, -1])
         next_word = torch.argmax(lprobs, dim=-1)
         if next_word == end_word: break
         path = torch.cat([path, next_word.unsqueeze(0)], dim=-1)
     return path.squeeze(0)[1:]
 
-def beam_search(model, memory, beam_size, src_mask=None, max_len=256, start_word=0, end_word=1):
+def beam_search(model, src_encs, beam_size, src_mask=None, max_len=256, start_word=0, end_word=1):
     if beam_size == 1:
-        return greedy_search(model, memory, src_mask, max_len, start_word, end_word)
+        return greedy_search(model, src_encs, src_mask, max_len, start_word, end_word)
     assert beam_size > 0
     finished = torch.zeros(1, dtype=torch.bool, device=device)
     paths = torch.full((1, max_len + 1), start_word, device=device)
     probs = torch.zeros(1, device=device)
 
     for i in range(1, max_len + 1):
-        logits = model.decode(memory.expand((~finished).count_nonzero(), -1, -1),
+        logits = model.decode(src_encs.expand((~finished).count_nonzero(), -1, -1),
             src_mask, paths[~finished, :i], triu_mask(i, device=device))
         scores = probs[~finished].unsqueeze(1) + model.generator(logits[:, -1])
         if i == 1: # increase capacity to beam_size

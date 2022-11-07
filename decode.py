@@ -1,40 +1,43 @@
 from manager import device, triu_mask
 import torch
 
-def greedy_search(model, src_encs, src_mask=None, max_len=256, start_word=0, end_word=1):
-    path = torch.full((1, 1), start_word, device=device)
-    for i in range(1, max_len + 1):
-        logits = model.decode(src_encs, src_mask, path, triu_mask(i, device=device))
-        lprobs = model.generator(logits[:, -1])
-        next_word = torch.argmax(lprobs, dim=-1)
-        if next_word == end_word: break
-        path = torch.cat([path, next_word.unsqueeze(0)], dim=-1)
-    return path.squeeze(0)[1:]
+def greedy_search(model, vocab, src_encs, src_mask, max_length):
+    path = torch.full((1, max_length), vocab.bos, device=device)
+    tgt_mask = triu_mask(max_length, device=device)
+    for i in range(1, max_length):
+        logits = model.decode(src_encs, path[:, :i], src_mask, tgt_mask[:, :i, :i])
+        lprobs = model.generator(logits[:, -1, :])
+        path[0, i] = torch.argmax(lprobs, dim=-1).unsqueeze(0)
+        if path[0, i] == vocab.eos: break
+    return path.squeeze(0)
 
-def beam_search(model, src_encs, beam_size, src_mask=None, max_len=256, start_word=0, end_word=1):
-    if beam_size == 1:
-        return greedy_search(model, src_encs, src_mask, max_len, start_word, end_word)
-    assert beam_size > 0
+def beam_search(model, vocab, src_encs, src_mask, max_length, beam_size):
+    assert beam_size > 0 and max_length > 0
     finished = torch.zeros(1, dtype=torch.bool, device=device)
-    paths = torch.full((1, max_len + 1), start_word, device=device)
+    paths = torch.full((1, max_length), vocab.bos, device=device)
     probs = torch.zeros(1, device=device)
+    tgt_mask = triu_mask(max_length, device=device)
+    beam_size, max_size = 1, beam_size
 
-    for i in range(1, max_len + 1):
-        logits = model.decode(src_encs.expand((~finished).count_nonzero(), -1, -1),
-            src_mask, paths[~finished, :i], triu_mask(i, device=device))
-        scores = probs[~finished].unsqueeze(1) + model.generator(logits[:, -1])
-        if i == 1: # increase capacity to beam_size
-            finished = finished.repeat(beam_size)
-            paths = paths.repeat(beam_size, 1)
-            probs = probs.repeat(beam_size)
+    for i in range(1, max_length):
+        logits = model.decode(src_encs.expand(beam_size, -1, -1),
+            paths[~finished, :i], src_mask, tgt_mask[:, :i, :i])
+        lprobs = model.generator(logits[:, -1, :])
+        scores = probs[~finished].unsqueeze(1) + lprobs
+        if i == 1: # increase beam_size to max_size
+            finished = finished.repeat(max_size)
+            paths = paths.repeat(max_size, 1)
+            probs = probs.repeat(max_size)
+            beam_size = max_size
 
         candidates = paths[~finished]
         topv, topi = torch.topk(scores.flatten(), beam_size)
-        if any(finished): # length normalization
+        if finished.any():
             for j in range(beam_size):
-                finished[finished.nonzero(as_tuple=True)] ^= probs[finished] < (topv[j] / i)
-            if (~finished).count_nonzero() > beam_size:
-                beam_size = (~finished).sum()
+                finished[finished == True] ^= probs[finished] < (topv[j] / i)
+            nonzero_count = (~finished).count_nonzero()
+            if nonzero_count > beam_size:
+                beam_size = nonzero_count
                 topv, topi = torch.topk(scores.flatten(), beam_size)
 
         paths[~finished] = candidates[
@@ -43,11 +46,10 @@ def beam_search(model, src_encs, beam_size, src_mask=None, max_len=256, start_wo
         paths[~finished, i] = topi % model.vocab_size
         probs[~finished] = topv
 
-        finished |= paths[:, i] == end_word
+        terminated = (paths[:, i] == vocab.eos)
+        probs[terminated] /= i
+        finished |= terminated
         beam_size = (~finished).count_nonzero()
-        probs[paths[:, i] == end_word] /= i
-        if all(finished): break
+        if finished.all(): break
 
-    best_path = paths[probs.argmax()]
-    end_index = (best_path == end_word).nonzero()
-    return best_path[1:end_index] if end_index.numel() else best_path[1:]
+    return paths[probs.argmax()]

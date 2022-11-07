@@ -1,10 +1,10 @@
-from model import Model
+from sacrebleu.metrics import BLEU, CHRF
 from manager import Vocab, Batch, load_data, device
+from model import Model
 from decode import beam_search
 from translate import detokenize
-from sacrebleu.metrics import BLEU, CHRF
 from datetime import timedelta
-import torch, time, json
+import torch, time, toml
 
 bleu, chrf = BLEU(), CHRF()
 
@@ -24,9 +24,9 @@ def score_model(config, indent=0):
             for i in range(batch.size()):
                 src_nums = batch._src_nums[i].unsqueeze(0)
                 tgt_nums = batch._tgt_nums[i].unsqueeze(0)
-                test_data.append(Batch(src_nums, tgt_nums, vocab.padding_idx))
+                test_data.append(Batch(src_nums, tgt_nums, vocab.pad))
     else:
-        test_data = load_data(config['data'], vocab)
+        test_data = load_data(config['data'], vocab, config['max_length'])
         assert len(test_data) > 0
 
     if isinstance(config['load'], Model):
@@ -36,20 +36,22 @@ def score_model(config, indent=0):
         model.load_state_dict(torch.load(config['load'], map_location=device))
         model.eval()
 
-    start = time.time()
+    start = time.perf_counter()
     candidate, reference = [], []
     with torch.no_grad():
         for batch in test_data:
-            src_encs = model.encode(batch.src_nums, batch.src_mask)
-            out = beam_search(model, src_encs, config['beam_size'], batch.src_mask)
-            reference.append(detokenize(vocab.denumberize(
-                *[num for num in batch._tgt_nums[0, 1:-1] if num != vocab.padding_idx]
-            ), config['lang']))
-            candidate.append(detokenize(vocab.denumberize(*out), config['lang']))
+            src_nums, src_mask = batch.src_nums, batch.src_mask
+            src_encs = model.encode(src_nums, src_mask)
+            tgt_nums = batch.tgt_nums.squeeze(0)
+            out_nums = beam_search(model, vocab, src_encs, src_mask,
+                config['max_length'], config['beam_size'])
+
+            reference.append(detokenize(vocab.denumberize(*tgt_nums), config['lang']))
+            candidate.append(detokenize(vocab.denumberize(*out_nums), config['lang']))
 
     bleu_score = bleu.corpus_score(candidate, [reference])
     chrf_score = chrf.corpus_score(candidate, [reference])
-    elapsed = timedelta(seconds=(time.time() - start))
+    elapsed = timedelta(seconds=(time.perf_counter() - start))
 
     output = f'BLEU = {bleu_score.score} | chrF2 = {chrf_score.score} | Decode Time: {elapsed}'
     if config['out']:
@@ -61,8 +63,7 @@ def score_model(config, indent=0):
 
     return bleu_score, chrf_score
 
-if __name__ == '__main__':
-    import argparse
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lang', nargs=2, metavar='LANG', required=True, help='source/target language')
     parser.add_argument('--data', metavar='FILE', help='testing data')
@@ -73,7 +74,7 @@ if __name__ == '__main__':
     args, unknown = parser.parse_known_args()
 
     with open(args.config) as file:
-        config = json.load(file)
+        config = toml.load(file)
 
     for i, arg in enumerate(unknown):
         if arg[:2] == '--' and arg[2:] in config:
@@ -93,3 +94,7 @@ if __name__ == '__main__':
         else f'data/output/out.{src_lang}{tgt_lang}'
 
     score_model(config)
+
+if __name__ == '__main__':
+    import argparse
+    main()

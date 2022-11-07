@@ -1,16 +1,13 @@
-from model import Model, EarlyStopping
 from manager import Vocab, load_data, device
+from model import Model, EarlyStopping
+from layers import CrossEntropy
 from score import score_model
-from layers import LabelSmoothing
 from datetime import timedelta
-import torch, random, time, json, tqdm
+import torch, random, tqdm, time, toml
 
-def iterator(iterable, progress):
-    return tqdm.tqdm(iterable) if progress else iterable
-
-def train_epoch(data, model, criterion, optimizer=None, progress=False, mode='train'):
-    total_loss = 0
-    for batch in iterator(data, progress):
+def train_epoch(data, model, criterion, optimizer=None, *, mode='train'):
+    total_loss = 0.
+    for batch in data:
         src_nums, tgt_nums = batch.src_nums, batch.tgt_nums
         src_mask, tgt_mask = batch.src_mask, batch.tgt_mask
 
@@ -18,7 +15,7 @@ def train_epoch(data, model, criterion, optimizer=None, progress=False, mode='tr
         lprobs = torch.flatten(model.generator(logits), 0, 1)
         loss = criterion(lprobs, torch.flatten(tgt_nums[:, 1:]))
 
-        if mode == 'train':
+        if optimizer and mode == 'train':
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -35,29 +32,28 @@ def train_model(config):
 
     train_data, val_data = [], []
     for data, data_file in ((train_data, config['data']), (val_data, config['test'])):
-        data[:] = load_data(data_file, vocab, config['batch_size'], config['max_length'])
+        data[:] = load_data(data_file, vocab, config['max_length'], config['batch_size'])
     assert len(train_data) > 0 and len(val_data) > 0
 
     model = Model(vocab.size()).to(device)
     model.src_embed[0].weight = model.tgt_embed[0].weight
     model.generator.weight = model.tgt_embed[0].weight
 
-    criterion = LabelSmoothing(config['smoothing'])
+    criterion = CrossEntropy(config['smoothing'])
     optimizer = torch.optim.Adam(model.parameters(), config['lr'])
-    stopping = EarlyStopping(config['patience'])
+    stopping = EarlyStopping(config['patience'], config['min_delta'])
 
     best_score, prev_loss = 0, torch.inf
     for epoch in range(config['n_epochs']):
         random.shuffle(train_data)
     
-        start = time.time()
+        start = time.perf_counter()
         model.train()
         train_loss = train_epoch(
-            train_data,
+            tqdm.tqdm(train_data) if config['tqdm'] else train_data,
             model,
             criterion,
             optimizer,
-            config['tqdm'],
             mode='train'
         )
 
@@ -69,7 +65,7 @@ def train_model(config):
                 criterion,
                 mode='eval',
             )
-        elapsed = timedelta(seconds=(time.time() - start))
+        elapsed = timedelta(seconds=(time.perf_counter() - start))
 
         print(f'[{epoch + 1}] Train Loss = {train_loss} | Val Loss = {val_loss} | Train Time: {elapsed}')
 
@@ -87,12 +83,11 @@ def train_model(config):
         if stopping(val_loss, prev_loss):
             print('Stopping Early...')
             break
-        print(flush=True)
+        print()
 
         prev_loss = val_loss
 
-if __name__ == '__main__':
-    import argparse
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lang', nargs=2, metavar='LANG', required=True, help='source/target language')
     parser.add_argument('--data', metavar='FILE', help='training data')
@@ -105,7 +100,7 @@ if __name__ == '__main__':
     args, unknown = parser.parse_known_args()
 
     with open(args.config) as file:
-        config = json.load(file)
+        config = toml.load(file)
 
     for i, arg in enumerate(unknown):
         if arg[:2] == '--' and arg[2:] in config:
@@ -130,3 +125,7 @@ if __name__ == '__main__':
         torch.manual_seed(args.seed)
         
     train_model(config)
+
+if __name__ == '__main__':
+    import argparse
+    main()

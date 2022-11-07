@@ -1,5 +1,5 @@
 from manager import clone
-import math, torch, torch.nn as nn
+import torch, torch.nn as nn, math
 
 class Linear(nn.Module):
 
@@ -53,10 +53,10 @@ class PositionalEncoding(nn.Module):
         x = x + self.enc[:, : x.size(1)]
         return self.dropout(x)
 
-class LabelSmoothing(nn.Module):
+class CrossEntropy(nn.Module):
 
     def __init__(self, smoothing):
-        super(LabelSmoothing, self).__init__()
+        super(CrossEntropy, self).__init__()
         self.smoothing = smoothing
 
     def forward(self, input, target):

@@ -1,4 +1,4 @@
-import copy, torch, torch.nn as nn
+import torch, torch.nn as nn, copy
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -10,8 +10,10 @@ class Vocab:
     def __init__(self):
         self.num_to_word = ['<BOS>', '<EOS>', '<PAD>', '<UNK>']
         self.word_to_num = {word: i for i, word in enumerate(self.num_to_word)}
-        self.padding_idx = self.word_to_num['<PAD>']
-        self.default_idx = self.word_to_num['<UNK>']
+        self.bos = self.word_to_num['<BOS>']
+        self.eos = self.word_to_num['<EOS>']
+        self.pad = self.word_to_num['<PAD>']
+        self.unk = self.word_to_num['<UNK>']
 
     def add(self, word):
         if word not in self.word_to_num:
@@ -24,27 +26,41 @@ class Vocab:
             self.num_to_word.remove(word)
             self.word_to_num.pop(word)
 
-    def numberize(self, *words):
-        return torch.tensor([
-            self.word_to_num[word] if word in self.word_to_num
-                else self.default_idx for word in words
-        ])
+    def numberize(self, *words, as_tensor=True):
+        nums = [self.word_to_num[word] if word in self.word_to_num
+            else self.unk for word in words]
+        return torch.tensor(nums) if as_tensor else nums
 
-    def denumberize(self, *nums):
-        return [self.num_to_word[num] for num in nums]
+    def denumberize(self, *nums, strip=True):
+        if not strip:
+            return [self.num_to_word[num] for num in nums]
+        try:
+            start = nums.index(self.bos) + 1
+        except ValueError:
+            start = 0
+        try:
+            end = nums.index(self.eos)
+        except ValueError:
+            end = len(nums)
+        return [self.num_to_word[num] for num in nums[start:end]]
 
     def size(self):
         return len(self.num_to_word)
 
 class Batch:
 
-    def __init__(self, src_nums, tgt_nums, padding_idx):
+    def __init__(self, src_nums, tgt_nums, ignore_index=None):
         self._src_nums = src_nums
         self._tgt_nums = tgt_nums
-        self._src_mask = (src_nums != padding_idx).unsqueeze(-2)
-        tgt_mask = (tgt_nums[:, :-1] != padding_idx).unsqueeze(-2)
-        self._tgt_mask = tgt_mask & triu_mask(tgt_nums[:, :-1].size(-1))
-        self._n_tokens = (tgt_nums[:, 1:] != padding_idx).sum()
+        if ignore_index:
+            self._src_mask = (src_nums != ignore_index).unsqueeze(-2)
+            self._tgt_mask = (tgt_nums[:, :-1] != ignore_index).unsqueeze(-2) \
+                & triu_mask(tgt_nums[:, :-1].size(-1))
+            self._n_tokens = (tgt_nums[:, 1:] != ignore_index).sum()
+        else:
+            self._src_mask = None
+            self._tgt_mask = triu_mask(tgt_nums[:, :-1].size(-1))
+            self._n_tokens = tgt_nums[:, 1:].sum()
 
     @property
     def src_nums(self):
@@ -73,13 +89,13 @@ def triu_mask(size, device=None):
     mask = torch.ones((1, size, size), device=device)
     return torch.triu(mask, diagonal=1) == 0
 
-def load_data(data, vocab, batch_size=None, max_length=None):
+def load_data(data, vocab, max_length=None, batch_size=None):
     unbatched = []
     with open(data) as file:
         for line in file:
             src_line, tgt_line = line.split('\t')
-            src_words, tgt_words = src_line.split(), tgt_line.split()
-            tgt_words = ['<BOS>'] + tgt_words + ['<EOS>']
+            src_words = src_line.split()
+            tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
 
             if not src_words or not tgt_words: continue
             if max_length and len(src_words) > max_length:
@@ -99,12 +115,12 @@ def load_data(data, vocab, batch_size=None, max_length=None):
 
         src_nums = torch.stack([
             nn.functional.pad(vocab.numberize(*src_words), (0, src_len - len(src_words)),
-                value=vocab.padding_idx) for src_words in src_batch
+                value=vocab.pad) for src_words in src_batch
         ])
         tgt_nums = torch.stack([
             nn.functional.pad(vocab.numberize(*tgt_words), (0, tgt_len - len(tgt_words)),
-                value=vocab.padding_idx) for tgt_words in tgt_batch
+                value=vocab.pad) for tgt_words in tgt_batch
         ])
 
-        batched.append(Batch(src_nums, tgt_nums, vocab.padding_idx))
+        batched.append(Batch(src_nums, tgt_nums, vocab.pad))
     return batched

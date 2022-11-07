@@ -1,16 +1,17 @@
-from model import Model
-from manager import Vocab, device
-from decode import beam_search
 from sacremoses import MosesTokenizer, MosesDetokenizer
 from subword_nmt.apply_bpe import BPE
-import torch, json, re
+from manager import Vocab, device
+from model import Model
+from decode import beam_search
+import torch, toml, re
 
-def tokenize(input, src_lang):
-    return MosesTokenizer(src_lang).tokenize(input, return_str=True)
+def tokenize(input, codes, src_lang):
+    string = MosesTokenizer(src_lang).tokenize(input, return_str=True)
+    return BPE(codes).process_line(string)
 
 def detokenize(output, tgt_lang):
-    output = MosesDetokenizer(tgt_lang).detokenize(output)
-    return re.sub('(@@ )|(@@ ?$)', '', output)
+    string = MosesDetokenizer(tgt_lang).detokenize(output)
+    return re.sub('(@@ )|(@@ ?$)', '', string)
 
 def translate(input, config):
     vocab = Vocab()
@@ -21,7 +22,7 @@ def translate(input, config):
 
     src_lang, tgt_lang = config['lang']
     with open(config['codes']) as file:
-        input = BPE(file).process_line(tokenize(input, src_lang))
+        input = tokenize(input, file, src_lang)
     assert len(input) > 0
 
     model = Model(vocab.size()).to(device)
@@ -31,11 +32,12 @@ def translate(input, config):
     with torch.no_grad():
         src_nums = vocab.numberize(*input.split()).unsqueeze(0)
         src_encs = model.encode(src_nums.to(device), None)
-        out = beam_search(model, src_encs, config['beam_size'])
-    return detokenize(vocab.denumberize(*out), tgt_lang)
+        out_nums = beam_search(model, vocab, src_encs, None,
+            config['max_length'], config['beam_size'])
 
-if __name__ == '__main__':
-    import argparse
+    return detokenize(vocab.denumberize(*out_nums), tgt_lang)
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lang', nargs=2, metavar='LANG', required=True, help='source/target language')
     parser.add_argument('--vocab', metavar='FILE', help='shared vocab')
@@ -46,7 +48,7 @@ if __name__ == '__main__':
     args, unknown = parser.parse_known_args()
 
     with open(args.config) as file:
-        config = json.load(file)
+        config = toml.load(file)
 
     for i, arg in enumerate(unknown):
         if arg[:2] == '--' and arg[2:] in config:
@@ -64,3 +66,7 @@ if __name__ == '__main__':
         else f'data/output/model.{src_lang}{tgt_lang}'
 
     print(translate(args.input, config))
+
+if __name__ == '__main__':
+    import argparse
+    main()

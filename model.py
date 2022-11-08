@@ -1,6 +1,5 @@
 from layers import PositionalEncoding, MultiHeadAttention, \
-    Embedding, LogSoftmax, ScaleNorm, FeedForward
-from manager import clone
+    Embedding, LogSoftmax, ScaleNorm, FeedForward, clone
 import torch, torch.nn as nn
 
 class EarlyStopping:

@@ -1,9 +1,9 @@
-from manager import Vocab, load_data, device
-from model import Model, EarlyStopping
+from manager import Manager, Tokenizer
+from model import EarlyStopping
 from layers import CrossEntropy
 from score import score_model
 from datetime import timedelta
-import torch, random, tqdm, time, toml
+import torch, random, time, tqdm, toml
 
 def train_epoch(data, model, criterion, optimizer=None, *, mode='train'):
     total_loss = 0.
@@ -23,62 +23,47 @@ def train_epoch(data, model, criterion, optimizer=None, *, mode='train'):
         total_loss += loss.item() / batch.n_tokens
     return total_loss
 
-def train_model(config):
-    vocab = Vocab()
-    with open(config['vocab']) as file:
-        for line in file:
-            vocab.add(line.split()[0])
-    assert vocab.size() > 0
+def train_model(manager, tokenizer, model_file=None, feedback=False):
+    if model_file:
+        manager.model.src_embed[0].weight = manager.model.tgt_embed[0].weight
+        manager.model.generator.weight = manager.model.tgt_embed[0].weight
 
-    train_data, val_data = [], []
-    for data, data_file in ((train_data, config['data']), (val_data, config['test'])):
-        data[:] = load_data(data_file, vocab, config['max_length'], config['batch_size'])
-    assert len(train_data) > 0 and len(val_data) > 0
-
-    model = Model(vocab.size()).to(device)
-    model.src_embed[0].weight = model.tgt_embed[0].weight
-    model.generator.weight = model.tgt_embed[0].weight
-
-    criterion = CrossEntropy(config['smoothing'])
-    optimizer = torch.optim.Adam(model.parameters(), config['lr'])
-    stopping = EarlyStopping(config['patience'], config['min_delta'])
+    criterion = CrossEntropy(manager.config['smoothing'])
+    optimizer = torch.optim.Adam(manager.model.parameters(), manager.config['lr'])
+    stopping = EarlyStopping(manager.config['patience'], manager.config['min_delta'])
 
     best_score, prev_loss = 0, torch.inf
-    for epoch in range(config['n_epochs']):
-        random.shuffle(train_data)
+    for epoch in range(manager.config['n_epochs']):
+        random.shuffle(manager.data)
     
         start = time.perf_counter()
-        model.train()
+        manager.model.train()
         train_loss = train_epoch(
-            tqdm.tqdm(train_data) if config['tqdm'] else train_data,
-            model,
+            tqdm.tqdm(manager.data) if feedback else manager.data,
+            manager.model,
             criterion,
             optimizer,
             mode='train'
         )
 
-        model.eval()
+        manager.model.eval()
         with torch.no_grad():
             val_loss = train_epoch(
-                val_data,
-                model,
+                manager.test,
+                manager.model,
                 criterion,
+                optimizer=None,
                 mode='eval',
             )
         elapsed = timedelta(seconds=(time.perf_counter() - start))
 
         print(f'[{epoch + 1}] Train Loss = {train_loss} | Val Loss = {val_loss} | Train Time: {elapsed}')
 
-        bleu_score, _ = score_model(config | {
-            'data': val_data,
-            'vocab': vocab,
-            'load': model,
-            'out': None
-        }, (epoch + 1) // 10 + 4)
+        bleu_score, _ = score_model(manager, tokenizer, indent=((epoch + 1) // 10 + 4))
 
         if bleu_score.score > best_score:
             print('Saving Model...')
-            torch.save(model.state_dict(), config['save'])
+            manager.save_model(model_file)
             best_score = bleu_score.score
         if stopping(val_loss, prev_loss):
             print('Stopping Early...')
@@ -94,37 +79,49 @@ def main():
     parser.add_argument('--test', metavar='FILE', help='validation data')
     parser.add_argument('--vocab', metavar='FILE', help='shared vocab')
     parser.add_argument('--config', metavar='FILE', default='model.config', help='model config')
+    parser.add_argument('--load', metavar='FILE', help='load state_dict')
     parser.add_argument('--save', metavar='FILE', help='save state_dict')
     parser.add_argument('--seed', type=int, help='random seed')
     parser.add_argument('--tqdm', action='store_true', help='toggle tqdm')
     args, unknown = parser.parse_known_args()
 
+    if args.seed:
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
+
+    src_lang, tgt_lang = args.lang
     with open(args.config) as file:
         config = toml.load(file)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     for i, arg in enumerate(unknown):
         if arg[:2] == '--' and arg[2:] in config:
             if len(unknown) >= i + 1:
                 config[arg[2:]] = int(unknown[i + 1])
 
-    src_lang, tgt_lang = args.lang
-    config['lang'] = tgt_lang
+    if not args.data:
+        args.data = f'data/training/train.tok.bpe.{src_lang}{tgt_lang}'
+    if not args.test:
+        args.test = f'data/validation/val.tok.bpe.{src_lang}{tgt_lang}'
+    if not args.vocab:
+        args.vocab = f'data/vocab.{src_lang}{tgt_lang}'
+    if not args.save:
+        args.save = f'data/model.{src_lang}{tgt_lang}'
 
-    config['data'] = args.data if args.data \
-        else f'data/training/train.tok.bpe.{src_lang}{tgt_lang}'
-    config['test'] = args.test if args.test \
-        else f'data/validation/val.tok.bpe.{src_lang}{tgt_lang}'
-    config['vocab'] = args.vocab if args.vocab \
-        else f'data/vocab.{src_lang}{tgt_lang}'
-    config['save'] = args.save if args.save \
-        else f'data/output/model.{src_lang}{tgt_lang}'
-    config['tqdm'] = args.tqdm
+    manager = Manager(
+        src_lang,
+        tgt_lang,
+        config,
+        device,
+        args.data,
+        args.test,
+        args.vocab
+    )
+    if args.load:
+        manager.load_model(args.load)
+    tokenizer = Tokenizer(src_lang, tgt_lang)
 
-    if args.seed:
-        random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        
-    train_model(config)
+    train_model(manager, tokenizer, args.save, args.tqdm)
 
 if __name__ == '__main__':
     import argparse

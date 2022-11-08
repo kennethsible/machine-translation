@@ -1,5 +1,7 @@
-from manager import clone
-import torch, torch.nn as nn, math
+import torch, torch.nn as nn, copy, math
+
+def clone(module, N):
+    return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
 class Linear(nn.Module):
 

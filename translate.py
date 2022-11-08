@@ -1,41 +1,33 @@
-from sacremoses import MosesTokenizer, MosesDetokenizer
-from subword_nmt.apply_bpe import BPE
-from manager import Vocab, device
-from model import Model
+from manager import Tokenizer, Manager
 from decode import beam_search
-import torch, toml, re
+import torch, toml
 
-def tokenize(input, codes, src_lang):
-    string = MosesTokenizer(src_lang).tokenize(input, return_str=True)
-    return BPE(codes).process_line(string)
+def translate(string, manager, tokenizer, model_file=None):
+    if model_file:
+        manager.load_model(model_file)
+        manager.model.eval()
 
-def detokenize(output, tgt_lang):
-    string = MosesDetokenizer(tgt_lang).detokenize(output)
-    return re.sub('(@@ )|(@@ ?$)', '', string)
-
-def translate(input, config):
-    vocab = Vocab()
-    with open(config['vocab']) as file:
-        for line in file:
-            vocab.add(line.split()[0])
-    assert vocab.size() > 0
-
-    src_lang, tgt_lang = config['lang']
-    with open(config['codes']) as file:
-        input = tokenize(input, file, src_lang)
-    assert len(input) > 0
-
-    model = Model(vocab.size()).to(device)
-    model.load_state_dict(torch.load(config['load'], map_location=device))
-    model.eval()
+    string = tokenizer.tokenize(string)
+    assert len(string) > 0
 
     with torch.no_grad():
-        src_nums = vocab.numberize(*input.split()).unsqueeze(0)
-        src_encs = model.encode(src_nums.to(device), None)
-        out_nums = beam_search(model, vocab, src_encs, None,
-            config['max_length'], config['beam_size'])
+        src_nums = manager.vocab.numberize(*string.split()).unsqueeze(0)
+        src_encs = manager.model.encode(src_nums.to(manager.device), None)
+        out_nums = beam_search(manager, src_encs, None,
+            manager.config['max_length'], manager.config['beam_size'])
 
-    return detokenize(vocab.denumberize(*out_nums), tgt_lang)
+    return tokenizer.detokenize(manager.vocab.denumberize(*out_nums))
+
+def interactive(manager, tokenizer, model_file=None):
+    if model_file:
+        manager.load_model(model_file)
+        manager.model.eval()
+
+    print('Interactive Mode (Ctrl+C to Quit)')
+    try:
+        while True:
+            print(translate(input('\n> '), manager, tokenizer))
+    except KeyboardInterrupt: pass
 
 def main():
     parser = argparse.ArgumentParser()
@@ -44,28 +36,46 @@ def main():
     parser.add_argument('--codes', metavar='FILE', help='shared codes')
     parser.add_argument('--config', metavar='FILE', default='model.config', help='model config')
     parser.add_argument('--load', metavar='FILE', help='load state_dict')
-    parser.add_argument('input', metavar='STRING', help='input string')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--file', metavar='FILE', help='input file')
+    group.add_argument('--string', metavar='STRING', help='input string')
+    group.add_argument('--interactive', action='store_true', help='interactive session')
     args, unknown = parser.parse_known_args()
 
+    src_lang, tgt_lang = args.lang
     with open(args.config) as file:
         config = toml.load(file)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     for i, arg in enumerate(unknown):
         if arg[:2] == '--' and arg[2:] in config:
             if len(unknown) >= i + 1:
                 config[arg[2:]] = int(unknown[i + 1])
 
-    src_lang, tgt_lang = args.lang
-    config['lang'] = args.lang
+    if not args.vocab:
+        args.vocab = f'data/vocab.{src_lang}{tgt_lang}'
+    if not args.codes:
+        args.codes = f'data/codes.{src_lang}{tgt_lang}'
+    if not args.load:
+        args.load = f'data/model.{src_lang}{tgt_lang}'
 
-    config['vocab'] = args.vocab if args.vocab \
-        else f'data/vocab.{src_lang}{tgt_lang}'
-    config['codes'] = args.codes if args.codes \
-        else f'data/codes.{src_lang}{tgt_lang}'
-    config['load'] = args.load if args.load \
-        else f'data/output/model.{src_lang}{tgt_lang}'
+    manager = Manager(
+        src_lang,
+        tgt_lang,
+        config,
+        device,
+        None,
+        None,
+        args.vocab
+    )
+    tokenizer = Tokenizer(src_lang, tgt_lang, args.codes)
 
-    print(translate(args.input, config))
+    if args.file:
+        pass # TODO
+    if args.string:
+        print(translate(args.string, manager, tokenizer, args.load))
+    elif args.interactive:
+        interactive(manager, tokenizer, args.load)
 
 if __name__ == '__main__':
     import argparse

@@ -4,7 +4,7 @@
 
 ## Train Model
 ```
-usage: main.py [-h] --lang LANG LANG [--data FILE] [--test FILE] [--vocab FILE] [--config FILE] [--save FILE] [--seed SEED] [--tqdm]
+usage: main.py [-h] --lang LANG LANG [--data FILE] [--test FILE] [--vocab FILE] [--config FILE] [--load FILE] [--save FILE] [--seed SEED] [--tqdm]
 
 optional arguments:
   -h, --help        show this help message and exit
@@ -13,6 +13,7 @@ optional arguments:
   --test FILE       validation data
   --vocab FILE      shared vocab
   --config FILE     model config
+  --load FILE       load state_dict
   --save FILE       save state_dict
   --seed SEED       random seed
   --tqdm            toggle tqdm
@@ -34,10 +35,7 @@ optional arguments:
 
 ## Translate Input
 ```
-usage: translate.py [-h] --lang LANG LANG [--vocab FILE] [--codes FILE] [--config FILE] [--load FILE] STRING
-
-positional arguments:
-  STRING            input string
+usage: translate.py [-h] --lang LANG LANG [--vocab FILE] [--codes FILE] [--config FILE] [--load FILE] (--file FILE | --string STRING | --interactive)
 
 optional arguments:
   -h, --help        show this help message and exit
@@ -46,4 +44,7 @@ optional arguments:
   --codes FILE      shared codes
   --config FILE     model config
   --load FILE       load state_dict
+  --file FILE       input file
+  --string STRING   input string
+  --interactive     interactive session
 ```

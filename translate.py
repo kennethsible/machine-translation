@@ -2,7 +2,15 @@ from manager import Tokenizer, Manager
 from decode import beam_search
 import torch, toml
 
-def translate(string, manager, tokenizer, model_file=None):
+def translate_file(infile, manager, tokenizer, model_file=None):
+    if model_file:
+        manager.load_model(model_file)
+        manager.model.eval()
+
+    with open(infile) as file:
+        return [translate_string(line, manager, tokenizer) for line in file]
+
+def translate_string(string, manager, tokenizer, model_file=None):
     if model_file:
         manager.load_model(model_file)
         manager.model.eval()
@@ -11,7 +19,12 @@ def translate(string, manager, tokenizer, model_file=None):
     assert len(string) > 0
 
     with torch.no_grad():
-        src_nums = manager.vocab.numberize(*string.split()).unsqueeze(0)
+        src_words = string.split()
+        max_length = manager.config['max_length']
+        if max_length and len(src_words) > max_length:
+            src_words = src_words[:max_length]
+
+        src_nums = manager.vocab.numberize(*src_words).unsqueeze(0)
         src_encs = manager.model.encode(src_nums.to(manager.device), None)
         out_nums = beam_search(manager, src_encs, None,
             manager.config['max_length'], manager.config['beam_size'])
@@ -26,7 +39,7 @@ def interactive(manager, tokenizer, model_file=None):
     print('Interactive Mode (Ctrl+C to Quit)')
     try:
         while True:
-            print(translate(input('\n> '), manager, tokenizer))
+            print(translate_string(input('\n> '), manager, tokenizer))
     except KeyboardInterrupt: pass
 
 def main():
@@ -71,9 +84,9 @@ def main():
     tokenizer = Tokenizer(src_lang, tgt_lang, args.codes)
 
     if args.file:
-        pass # TODO
+        print(*translate_file(args.file, manager, tokenizer, args.load), sep='\n')
     if args.string:
-        print(translate(args.string, manager, tokenizer, args.load))
+        print(translate_string(args.string, manager, tokenizer, args.load))
     elif args.interactive:
         interactive(manager, tokenizer, args.load)
 

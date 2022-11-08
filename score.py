@@ -6,7 +6,7 @@ import torch, time, toml
 
 bleu, chrf = BLEU(), CHRF()
 
-def score_model(manager, tokenizer, model_file=None, output_file=None, indent=0):
+def score_model(manager, tokenizer, model_file=None, *, indent=0):
     if model_file:
         manager.load_model(model_file)
         manager.model.eval()
@@ -30,15 +30,9 @@ def score_model(manager, tokenizer, model_file=None, output_file=None, indent=0)
     chrf_score = chrf.corpus_score(candidate, [reference])
     elapsed = timedelta(seconds=(time.perf_counter() - start))
 
-    output = f'BLEU = {bleu_score.score} | chrF2 = {chrf_score.score} | Decode Time: {elapsed}'
-    if output_file:
-        with open(output_file, 'w') as file:
-            file.write(output + '\n\n')
-            for translation in candidate:
-                file.write(translation + '\n')
-    print(indent * ' ' + output)
+    print(indent * ' ' + f'BLEU = {bleu_score.score} | chrF2 = {chrf_score.score} | Decode Time: {elapsed}')
 
-    return bleu_score, chrf_score
+    return bleu_score, chrf_score, candidate
 
 def main():
     parser = argparse.ArgumentParser()
@@ -47,7 +41,6 @@ def main():
     parser.add_argument('--vocab', metavar='FILE', help='shared vocab')
     parser.add_argument('--config', metavar='FILE', default='model.config', help='model config')
     parser.add_argument('--load', metavar='FILE', help='load state_dict')
-    parser.add_argument('--out', metavar='FILE', help='save output')
     args, unknown = parser.parse_known_args()
 
     src_lang, tgt_lang = args.lang
@@ -66,8 +59,6 @@ def main():
         args.vocab = f'data/vocab.{src_lang}{tgt_lang}'
     if not args.load:
         args.load = f'data/model.{src_lang}{tgt_lang}'
-    if not args.out:
-        args.out = f'data/out.{src_lang}{tgt_lang}'
 
     manager = Manager(
         src_lang,
@@ -80,7 +71,8 @@ def main():
     )
     tokenizer = Tokenizer(src_lang, tgt_lang)
 
-    score_model(manager, tokenizer, args.load, args.out)
+    _, _, candidate = score_model(manager, tokenizer, args.load)
+    print('', *candidate, sep='\n')
 
 if __name__ == '__main__':
     import argparse

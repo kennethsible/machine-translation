@@ -1,6 +1,15 @@
 # Neural Machine Translation in PyTorch
-**Ken Sible | [NLP Group](https://nlp.nd.edu)**<br>
-**University of Notre Dame**
+**Ken Sible | [NLP Group](https://nlp.nd.edu)** | **University of Notre Dame**
+
+Note, any option in `model.config` can also be passed as a command line argument.
+```
+$ python translate.py --lang de en --beam_size 5 --string "Ich übersetze gerne!"
+```
+
+Additionally, any command line output can be redirected from `stdout` to a file.
+```
+$ python translate.py --lang de en --file infile.txt > outfile.txt
+```
 
 ## Train Model
 ```
@@ -21,7 +30,7 @@ optional arguments:
 
 ## Score Model
 ```
-usage: score.py [-h] --lang LANG LANG [--data FILE] [--vocab FILE] [--config FILE] [--load FILE] [--out FILE]
+usage: score.py [-h] --lang LANG LANG [--data FILE] [--vocab FILE] [--config FILE] [--load FILE]
 
 optional arguments:
   -h, --help        show this help message and exit
@@ -30,7 +39,6 @@ optional arguments:
   --vocab FILE      shared vocab
   --config FILE     model config
   --load FILE       load state_dict
-  --out FILE        save output
 ```
 
 ## Translate Input

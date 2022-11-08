@@ -23,7 +23,7 @@ def train_epoch(data, model, criterion, optimizer=None, *, mode='train'):
         total_loss += loss.item() / batch.n_tokens
     return total_loss
 
-def train_model(manager, tokenizer, model_file=None, feedback=False):
+def train_model(manager, tokenizer, model_file=None, *, feedback=False):
     if model_file:
         manager.model.src_embed[0].weight = manager.model.tgt_embed[0].weight
         manager.model.generator.weight = manager.model.tgt_embed[0].weight
@@ -59,7 +59,7 @@ def train_model(manager, tokenizer, model_file=None, feedback=False):
 
         print(f'[{epoch + 1}] Train Loss = {train_loss} | Val Loss = {val_loss} | Train Time: {elapsed}')
 
-        bleu_score, _ = score_model(manager, tokenizer, indent=((epoch + 1) // 10 + 4))
+        bleu_score, _, _ = score_model(manager, tokenizer, indent=((epoch + 1) // 10 + 4))
 
         if bleu_score.score > best_score:
             print('Saving Model...')
@@ -121,7 +121,7 @@ def main():
         manager.load_model(args.load)
     tokenizer = Tokenizer(src_lang, tgt_lang)
 
-    train_model(manager, tokenizer, args.save, args.tqdm)
+    train_model(manager, tokenizer, args.save, feedback=args.tqdm)
 
 if __name__ == '__main__':
     import argparse

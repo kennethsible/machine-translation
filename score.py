@@ -15,14 +15,12 @@ def score_model(manager, tokenizer, model_file=None, *, indent=0):
     candidate, reference = [], []
     with torch.no_grad():
         for batch in manager.test:
-            src_nums = batch.src_nums
+            src_nums, tgt_nums = batch.src_nums, batch.tgt_nums
             src_mask = batch.src_mask
             src_encs = manager.model.encode(src_nums, src_mask)
-            tgt_nums = batch.tgt_nums
-            for i in range(src_encs.size(0)):
-                out_nums = beam_search(manager, src_encs[i], src_mask[i],
-                    manager.config['max_length'], manager.config['beam_size'])
 
+            for i in range(src_encs.size(0)):
+                out_nums = beam_search(manager, src_encs[i], src_mask[i], manager.config['beam-width'])
                 reference.append(tokenizer.detokenize(manager.vocab.denumberize(*tgt_nums[i])))
                 candidate.append(tokenizer.detokenize(manager.vocab.denumberize(*out_nums)))
 

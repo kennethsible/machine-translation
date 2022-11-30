@@ -7,12 +7,12 @@ class EarlyStopping:
     def __init__(self, patience, min_delta):
         self.patience = patience
         self.min_delta = min_delta
-        self.count = 0
+        self.counter = 0
 
     def __call__(self, curr_loss, prev_loss):
         if (curr_loss - prev_loss) > self.min_delta:
-            self.count += 1
-            if self.count >= self.patience:
+            self.counter += 1
+            if self.counter >= self.patience:
                 return True
         return False
 

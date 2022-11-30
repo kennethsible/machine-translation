@@ -1,21 +1,19 @@
 #!/bin/bash
 
-commentary_v12=0
 commoncrawl=0
 europarl_v7=0
 src_lang=$2
 tgt_lang=$3
 merge_ops=$4
 
-while getopts ":nce" opt; do
+while getopts ":ce" opt; do
    case $opt in
-      n) commentary_v12=1;;
       c) commoncrawl=1;;
       e) europarl_v7=1;;
    esac
 done
 
-usage="usage: preprocess.sh [-nce] SRC_LANG TGT_LANG MERGE_OPS"
+usage="usage: preprocess.sh [-ce] SRC_LANG TGT_LANG MERGE_OPS"
 if [ -z "$src_lang" ] || [ -z "$tgt_lang" ] || [ -z "$merge_ops" ]; then
     echo -e "$usage"
     exit 1
@@ -36,24 +34,14 @@ END
     echo "$output\n"
 }
 
-mkdir -p data data/output data/training
+mkdir -p data data/training
 
 echo "Downloading WMT17 Training Corpora..."
-if [ $commentary_v12 -eq 0 ] && [ $commoncrawl -eq 0 ] && [ $europarl_v7 -eq 0 ]; then
+if [ $commoncrawl -eq 0 ] && [ $europarl_v7 -eq 0 ]; then
     echo -e "$usage"
     exit 1
 fi
 for path in "data/training"; do
-    if [ $commentary_v12 -eq 1 ]; then
-        wget -q -O data/news-commentary-v12.tgz "http://data.statmt.org/wmt17/translation-task/training-parallel-nc-v12.tgz" --show-progress
-        tar -xzf data/news-commentary-v12.tgz -C data && rm data/news-commentary-v12.tgz
-        find data/training -type f ! -name "*$src_lang-$tgt_lang*" -delete
-        cat "$path/news-commentary-v12.$src_lang-$tgt_lang.$src_lang" >> "$path/train.$src_lang"
-        cat "$path/news-commentary-v12.$src_lang-$tgt_lang.$tgt_lang" >> "$path/train.$tgt_lang"
-        find data/training -type f -name "*$src_lang-$tgt_lang*" -delete
-        wc -l "$path/train.$src_lang"
-    fi
-
     if [ $commoncrawl -eq 1 ]; then
         wget -q -O data/commoncrawl.tgz "https://www.statmt.org/wmt13/training-parallel-commoncrawl.tgz" --show-progress
         tar -xzf data/commoncrawl.tgz -C data && rm data/commoncrawl.tgz

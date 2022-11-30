@@ -19,15 +19,17 @@ def translate_string(string, manager, tokenizer, model_file=None):
     assert len(string) > 0
 
     with torch.no_grad():
+        max_length = manager.config['max-length']
+        if max_length: max_length -= 2
+
         src_words = string.split()
-        max_length = manager.config['max_length']
         if max_length and len(src_words) > max_length:
             src_words = src_words[:max_length]
+        src_words = ['<BOS>'] + src_words + ['<EOS>']
 
         src_nums = manager.vocab.numberize(*src_words).unsqueeze(0)
         src_encs = manager.model.encode(src_nums.to(manager.device), None)
-        out_nums = beam_search(manager, src_encs, None,
-            manager.config['max_length'], manager.config['beam_size'])
+        out_nums = beam_search(manager, src_encs, None, manager.config['beam-width'])
 
     return tokenizer.detokenize(manager.vocab.denumberize(*out_nums))
 

@@ -30,10 +30,10 @@ def train_model(manager, tokenizer, model_file=None, *, feedback=False):
 
     criterion = CrossEntropy(manager.config['smoothing'])
     optimizer = torch.optim.Adam(manager.model.parameters(), manager.config['lr'])
-    stopping = EarlyStopping(manager.config['patience'], manager.config['min_delta'])
+    stopping = EarlyStopping(manager.config['patience'], manager.config['min-delta'])
 
     best_score, prev_loss = 0, torch.inf
-    for epoch in range(manager.config['n_epochs']):
+    for epoch in range(manager.config['n-epochs']):
         random.shuffle(manager.data)
     
         start = time.perf_counter()

@@ -145,15 +145,16 @@ class Manager:
         torch.save(state_dict, model_file)
 
     def load_data(self, data):
-        max_length = self.config['max_length']
-        batch_size = self.config['batch_size']
+        max_length = self.config['max-length']
+        batch_size = self.config['batch-size']
+        if max_length: max_length -= 2
 
         unbatched = []
         with open(data) as file:
             for line in file:
                 src_line, tgt_line = line.split('\t')
                 src_words = src_line.split()
-                tgt_words = ['<BOS>'] + tgt_line.split() + ['<EOS>']
+                tgt_words = tgt_line.split()
 
                 if not src_words or not tgt_words: continue
                 if max_length and len(src_words) > max_length:
@@ -161,7 +162,10 @@ class Manager:
                 if max_length and len(tgt_words) > max_length:
                     tgt_words = tgt_words[:max_length]
 
-                unbatched.append((src_words, tgt_words))
+                unbatched.append((
+                    ['<BOS>'] + src_words + ['<EOS>'],
+                    ['<BOS>'] + tgt_words + ['<EOS>']
+                ))
         unbatched.sort(key=lambda x: len(x[0]))
 
         batched = []

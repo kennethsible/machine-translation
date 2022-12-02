@@ -1,7 +1,10 @@
 from sacremoses import MosesTokenizer, MosesDetokenizer
 from subword_nmt.apply_bpe import BPE
+from layers import CrossEntropy
+from main import train_epoch
 from model import Model
-import torch, torch.nn as nn, re
+import torch, torch.nn as nn
+import math, re
 
 class Tokenizer:
 
@@ -125,6 +128,8 @@ class Manager:
             assert self.vocab.size() > 0
         else: self.vocab = None
 
+        self.model = Model(self.vocab.size()).to(device)
+
         if data_file:
             self.data = self.load_data(data_file)
             assert len(self.data) > 0
@@ -134,8 +139,6 @@ class Manager:
             assert len(self.test) > 0
         else: self.test = None
 
-        self.model = Model(self.vocab.size()).to(device)
-
     def load_model(self, model_file):
         state_dict = torch.load(model_file, self.device)
         self.model.load_state_dict(state_dict)
@@ -144,10 +147,35 @@ class Manager:
         state_dict = self.model.state_dict()
         torch.save(state_dict, model_file)
 
+    def batch_size_search(self):
+        criterion = CrossEntropy(self.config['smoothing'])
+        optimizer = torch.optim.Adam(self.model.parameters(), self.config['lr'])
+        self.model.train()
+
+        batch_size, max_length = 1, self.config['max-length']
+        while True:
+            src_nums = torch.zeros((batch_size * 2, max_length), dtype=torch.long)
+            tgt_nums = torch.zeros((batch_size * 2, max_length), dtype=torch.long)
+            batch = Batch(src_nums, tgt_nums, self.device, self.vocab.pad)
+            try:
+                train_epoch(
+                    [batch],
+                    self.model,
+                    criterion,
+                    optimizer,
+                    mode='train'
+                )
+            except RuntimeError:
+                return batch_size
+            batch_size *= 2
+
     def load_data(self, data):
         max_length = self.config['max-length']
         batch_size = self.config['batch-size']
-        if max_length: max_length -= 2
+        mem_fill = batch_size == -1
+        if mem_fill:
+            mem_limit = max_length * self.batch_size_search()
+        max_length -= 2
 
         unbatched = []
         with open(data) as file:
@@ -166,23 +194,34 @@ class Manager:
                     ['<BOS>'] + src_words + ['<EOS>'],
                     ['<BOS>'] + tgt_words + ['<EOS>']
                 ))
-        unbatched.sort(key=lambda x: len(x[0]))
+        unbatched.sort(key=lambda x: (len(x[0]), len(x[1])), reverse=True)
 
-        batched = []
-        if not batch_size: batch_size = 1
-        for i in range(0, len(unbatched), batch_size):
-            src_batch, tgt_batch = zip(*unbatched[i:(i + batch_size)])
-            src_len = max(len(src_words) for src_words in src_batch)
-            tgt_len = max(len(tgt_words) for tgt_words in tgt_batch)
+        i, batched = 0, []
+        while i < len(unbatched):
+            src_len = len(unbatched[i][0])
+            tgt_len = len(unbatched[i][1])
+            while True:
+                if mem_fill:
+                    batch_size = mem_limit // max(src_len, tgt_len)
+                    if batch_size & (batch_size - 1) != 0:
+                        batch_size = 2 ** (math.ceil(math.log2(batch_size)) - 1)
+                src_batch, tgt_batch = zip(*unbatched[i:(i + batch_size)])
+                max_src_len = max(len(src_words) for src_words in src_batch)
+                max_tgt_len = max(len(tgt_words) for tgt_words in tgt_batch)
+                if mem_fill:
+                    if (src_len >= max_src_len and tgt_len >= max_tgt_len): break # TODO
+                    src_len, tgt_len = max_src_len, max_tgt_len
+                else: break
 
             src_nums = torch.stack([
-                nn.functional.pad(self.vocab.numberize(*src_words), (0, src_len - len(src_words)),
+                nn.functional.pad(self.vocab.numberize(*src_words), (0, max_src_len - len(src_words)),
                     value=self.vocab.pad) for src_words in src_batch
             ])
             tgt_nums = torch.stack([
-                nn.functional.pad(self.vocab.numberize(*tgt_words), (0, tgt_len - len(tgt_words)),
+                nn.functional.pad(self.vocab.numberize(*tgt_words), (0, max_tgt_len - len(tgt_words)),
                     value=self.vocab.pad) for tgt_words in tgt_batch
             ])
 
             batched.append(Batch(src_nums, tgt_nums, self.device, self.vocab.pad))
+            i += batch_size
         return batched

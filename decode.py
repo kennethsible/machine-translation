@@ -13,6 +13,8 @@ def greedy_search(manager, src_encs, src_mask, max_length=512):
     return path.squeeze(0)
 
 def beam_search(manager, src_encs, src_mask, beam_width, max_length=512):
+    if beam_width == 1: return greedy_search(manager, src_encs, src_mask, max_length)
+
     finished = torch.zeros(1, dtype=torch.bool, device=manager.device)
     paths = torch.full((1, max_length), manager.vocab.bos, device=manager.device)
     probs = torch.zeros(1, device=manager.device)

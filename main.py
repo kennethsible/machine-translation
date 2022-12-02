@@ -21,6 +21,7 @@ def train_epoch(data, model, criterion, optimizer=None, *, mode='train'):
             optimizer.step()
 
         total_loss += loss.item() / batch.n_tokens
+        del logits, lprobs, loss
     return total_loss
 
 def train_model(manager, tokenizer, model_file=None, *, feedback=False):

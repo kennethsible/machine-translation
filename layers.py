@@ -1,4 +1,5 @@
-import torch, torch.nn as nn, copy, math
+import torch, torch.nn as nn
+import math, copy
 
 def clone(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])

@@ -102,3 +102,22 @@ class Model(nn.Module):
 
     def decode(self, src_encs, tgt_nums, src_mask, tgt_mask):
         return self.decoder(self.tgt_embed(tgt_nums), src_encs, src_mask, tgt_mask)
+
+def train_epoch(data, model, criterion, optimizer=None, *, mode='train'):
+    total_loss = 0.
+    for batch in data:
+        src_nums, tgt_nums = batch.src_nums, batch.tgt_nums
+        src_mask, tgt_mask = batch.src_mask, batch.tgt_mask
+
+        logits = model(src_nums, tgt_nums[:, :-1], src_mask, tgt_mask)
+        lprobs = torch.flatten(model.generator(logits), 0, 1)
+        loss = criterion(lprobs, torch.flatten(tgt_nums[:, 1:]))
+
+        if optimizer and mode == 'train':
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        total_loss += loss.item() / batch.n_tokens
+        del logits, lprobs, loss
+    return total_loss

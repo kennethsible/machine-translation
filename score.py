@@ -7,11 +7,9 @@ import torch, time, toml
 bleu, chrf = BLEU(), CHRF()
 
 def score_model(manager, tokenizer, model_file=None, *, indent=0):
-    if model_file:
-        manager.load_model(model_file)
-        manager.model.eval()
-
     start = time.perf_counter()
+    manager.model.eval()
+
     candidate, reference = [], []
     with torch.no_grad():
         for batch in manager.test:
@@ -28,7 +26,11 @@ def score_model(manager, tokenizer, model_file=None, *, indent=0):
     chrf_score = chrf.corpus_score(candidate, [reference])
     elapsed = timedelta(seconds=(time.perf_counter() - start))
 
-    print(indent * ' ' + f'BLEU = {bleu_score.score} | chrF2 = {chrf_score.score} | Decode Time: {elapsed}')
+    status_update = indent * ' ' + f'BLEU = {bleu_score.score} | chrF2 = {chrf_score.score} | Decode Time: {elapsed}'
+    if model_file:
+        with open(model_file + '.log', 'a') as file:
+            file.write(status_update + '\n')
+    print(status_update)
 
     return bleu_score, chrf_score, candidate
 
@@ -57,6 +59,7 @@ def main():
         args.vocab = f'data/vocab.{src_lang}{tgt_lang}'
     if not args.load:
         args.load = f'data/model.{src_lang}{tgt_lang}'
+        open(args.load + '.log', 'w').close()
 
     manager = Manager(
         src_lang,
@@ -67,6 +70,8 @@ def main():
         args.data,
         args.vocab
     )
+    if args.load:
+        manager.load_model(args.load)
     tokenizer = Tokenizer(src_lang, tgt_lang)
 
     _, _, candidate = score_model(manager, tokenizer, args.load)

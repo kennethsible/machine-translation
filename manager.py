@@ -1,8 +1,7 @@
 from sacremoses import MosesTokenizer, MosesDetokenizer
 from subword_nmt.apply_bpe import BPE
 from layers import CrossEntropy
-from main import train_epoch
-from model import Model
+from model import Model, train_epoch
 import torch, torch.nn as nn
 import math, re
 
@@ -148,6 +147,9 @@ class Manager:
         torch.save(state_dict, model_file)
 
     def batch_size_search(self):
+        if not next(self.model.parameters()).is_cuda:
+            raise RuntimeError('cannot optimize batch size on CPU (only CUDA)')
+
         criterion = CrossEntropy(self.config['smoothing'])
         optimizer = torch.optim.Adam(self.model.parameters(), self.config['lr'])
         self.model.train()

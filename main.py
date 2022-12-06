@@ -1,28 +1,9 @@
 from manager import Manager, Tokenizer
-from model import EarlyStopping
+from model import EarlyStopping, train_epoch
 from layers import CrossEntropy
 from score import score_model
 from datetime import timedelta
 import torch, random, time, tqdm, toml
-
-def train_epoch(data, model, criterion, optimizer=None, *, mode='train'):
-    total_loss = 0.
-    for batch in data:
-        src_nums, tgt_nums = batch.src_nums, batch.tgt_nums
-        src_mask, tgt_mask = batch.src_mask, batch.tgt_mask
-
-        logits = model(src_nums, tgt_nums[:, :-1], src_mask, tgt_mask)
-        lprobs = torch.flatten(model.generator(logits), 0, 1)
-        loss = criterion(lprobs, torch.flatten(tgt_nums[:, 1:]))
-
-        if optimizer and mode == 'train':
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-        total_loss += loss.item() / batch.n_tokens
-        del logits, lprobs, loss
-    return total_loss
 
 def train_model(manager, tokenizer, model_file=None, *, feedback=False):
     if model_file:
@@ -58,17 +39,30 @@ def train_model(manager, tokenizer, model_file=None, *, feedback=False):
             )
         elapsed = timedelta(seconds=(time.perf_counter() - start))
 
-        print(f'[{epoch + 1}] Train Loss = {train_loss} | Val Loss = {val_loss} | Train Time: {elapsed}')
+        status_update = f'[{epoch + 1}] Train Loss = {train_loss} | Val Loss = {val_loss} | Train Time: {elapsed}'
+        if model_file:
+            with open(model_file + '.log', 'a') as file:
+                file.write(status_update + '\n')
+        print(status_update)
 
-        bleu_score, _, _ = score_model(manager, tokenizer, indent=((epoch + 1) // 10 + 4))
+        bleu_score, _, _ = score_model(manager, tokenizer, model_file, indent=((epoch + 1) // 10 + 4))
 
         if bleu_score.score > best_score:
+            if model_file:
+                with open(model_file + '.log', 'a') as file:
+                    file.write('Saving Model...\n')
             print('Saving Model...')
             manager.save_model(model_file)
             best_score = bleu_score.score
         if stopping(val_loss, prev_loss):
+            if model_file:
+                with open(model_file + '.log', 'a') as file:
+                    file.write('Stopping Early...\n')
             print('Stopping Early...')
             break
+        if model_file:
+            with open(model_file + '.log', 'a') as file:
+                file.write('\n')
         print()
 
         prev_loss = val_loss
@@ -108,6 +102,7 @@ def main():
         args.vocab = f'data/vocab.{src_lang}{tgt_lang}'
     if not args.save:
         args.save = f'data/model.{src_lang}{tgt_lang}'
+        open(args.save + '.log', 'w').close()
 
     manager = Manager(
         src_lang,

@@ -71,16 +71,8 @@ class Batch:
     def __init__(self, src_nums, tgt_nums, device=None, ignore_index=None):
         self._src_nums = src_nums
         self._tgt_nums = tgt_nums
-        if ignore_index:
-            self._src_mask = (src_nums != ignore_index).unsqueeze(-2)
-            self._tgt_mask = (tgt_nums[:, :-1] != ignore_index).unsqueeze(-2) \
-                & triu_mask(tgt_nums[:, :-1].size(-1))
-            self._n_tokens = (tgt_nums[:, 1:] != ignore_index).sum()
-        else:
-            self._src_mask = None
-            self._tgt_mask = triu_mask(tgt_nums[:, :-1].size(-1))
-            self._n_tokens = tgt_nums[:, 1:].sum()
         self.device = device
+        self.ignore_index = ignore_index
 
     @property
     def src_nums(self):
@@ -92,15 +84,21 @@ class Batch:
 
     @property
     def src_mask(self):
-        return self._src_mask.to(self.device)
+        if not self.ignore_index: return None
+        return (self.src_nums != self.ignore_index).unsqueeze(-2)
 
     @property
     def tgt_mask(self):
-        return self._tgt_mask.to(self.device)
+        if not self.ignore_index:
+            return triu_mask(self.tgt_nums[:, :-1].size(-1))
+        return (self.tgt_nums[:, :-1] != self.ignore_index).unsqueeze(-2) \
+            & triu_mask(self.tgt_nums[:, :-1].size(-1), device=self.device)
 
     @property
     def n_tokens(self):
-        return self._n_tokens.item()
+        if not self.ignore_index:
+            return self.tgt_nums[:, 1:].sum()
+        return (self.tgt_nums[:, 1:] != self.ignore_index).sum()
 
     def size(self):
         return self._src_nums.size(0)

@@ -1,6 +1,5 @@
 from sacremoses import MosesTokenizer, MosesDetokenizer
 from subword_nmt.apply_bpe import BPE
-from layers import CrossEntropy
 from model import Model, train_epoch
 import torch, torch.nn as nn
 import math, re
@@ -125,7 +124,14 @@ class Manager:
             assert self.vocab.size() > 0
         else: self.vocab = None
 
-        self.model = Model(self.vocab.size()).to(device)
+        self.model = Model(
+            self.vocab.size(),
+            config['embed_dim'],
+            config['ff_dim'],
+            config['num_heads'],
+            config['num_layers'],
+            config['dropout']
+        ).to(device)
 
         if data_file:
             self.data = self.load_data(data_file)
@@ -148,7 +154,7 @@ class Manager:
         if not next(self.model.parameters()).is_cuda:
             raise RuntimeError('cannot optimize batch size on CPU (only CUDA)')
 
-        criterion = CrossEntropy(self.config['smoothing'])
+        criterion = torch.nn.CrossEntropyLoss(label_smoothing=self.config['label-smoothing'])
         optimizer = torch.optim.Adam(self.model.parameters(), self.config['lr'])
         self.model.train()
 

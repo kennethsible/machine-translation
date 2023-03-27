@@ -1,23 +1,28 @@
-from manager import Manager, Tokenizer
-from model import EarlyStopping, train_epoch
-from layers import CrossEntropy
-from score import score_model
+from manager import Manager
+from model import train_epoch
 from datetime import timedelta
 import torch, random, time, tqdm, toml
 
-def train_model(manager, tokenizer, model_file=None, *, feedback=False):
+def train_model(manager, model_file=None, *, feedback=False):
     if model_file:
         manager.model.src_embed[0].weight = manager.model.tgt_embed[0].weight
         manager.model.generator.weight = manager.model.tgt_embed[0].weight
 
-    criterion = CrossEntropy(manager.config['smoothing'])
-    optimizer = torch.optim.Adam(manager.model.parameters(), manager.config['lr'])
-    stopping = EarlyStopping(manager.config['patience'], manager.config['min-delta'])
+    criterion = torch.nn.CrossEntropyLoss(label_smoothing=manager.config['label-smoothing'])
+    optimizer = torch.optim.Adam(manager.model.parameters(), lr=manager.config['lr'])
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
+        factor=manager.config['decay-factor'], patience=manager.config['patience'])
 
-    best_score, prev_loss = 0, torch.inf
-    for epoch in range(manager.config['n-epochs']):
+    prev_val_loss = torch.inf
+    for epoch in range(manager.config['max-epochs']):
+        if epoch > 0:
+            if model_file:
+                with open(model_file + '.log', 'a') as file:
+                    file.write('\n')
+            print()
+
         random.shuffle(manager.data)
-    
+
         start = time.perf_counter()
         manager.model.train()
         train_loss = train_epoch(
@@ -37,43 +42,47 @@ def train_model(manager, tokenizer, model_file=None, *, feedback=False):
                 optimizer=None,
                 mode='eval',
             )
+        scheduler.step(val_loss)
         elapsed = timedelta(seconds=(time.perf_counter() - start))
 
-        status_update = f'[{epoch + 1}] Train Loss = {train_loss} | Val Loss = {val_loss} | Train Time: {elapsed}'
+        checkpoint = f'[{str(epoch + 1).rjust(len(str(manager.config["max-epochs"])), "0")}]'
+        checkpoint += f' Training PPL = {torch.exp(train_loss):.4e}'
+        checkpoint += f' | Validation PPL = {torch.exp(val_loss):.4e}'
+        checkpoint += f' | Learning Rate = {optimizer.param_groups[0]["lr"]:.4e}'
+        checkpoint += f' | Elapsed Time = {elapsed}'
         if model_file:
             with open(model_file + '.log', 'a') as file:
-                file.write(status_update + '\n')
-        print(status_update)
+                file.write(checkpoint + '\n')
+        print(checkpoint)
 
-        bleu_score, _, _ = score_model(manager, tokenizer, model_file, indent=((epoch + 1) // 10 + 4))
+        # score_model(manager, tokenizer, model_file, indent=((epoch + 1) // 10 + 4))
 
-        if bleu_score.score > best_score:
-            if model_file:
-                with open(model_file + '.log', 'a') as file:
-                    file.write('Saving Model...\n')
-            print('Saving Model...')
+        if val_loss < prev_val_loss:
             manager.save_model(model_file)
-            best_score = bleu_score.score
-        if stopping(val_loss, prev_loss):
             if model_file:
                 with open(model_file + '.log', 'a') as file:
-                    file.write('Stopping Early...\n')
-            print('Stopping Early...')
-            break
-        if model_file:
-            with open(model_file + '.log', 'a') as file:
-                file.write('\n')
-        print()
+                    file.write('Saving Model Checkpoint.\n')
+            print('Saving Model Checkpoint.')
+            prev_val_loss = val_loss
+        if optimizer.param_groups[0]['lr'] < manager.config['min-lr']:
+            if model_file:
+                with open(model_file + '.log', 'a') as file:
+                    file.write('Minimum Learning Rate Reached. Stopping Training.\n')
+            print('Minimum Learning Rate Reached. Stopping Training.')
+            return
 
-        prev_loss = val_loss
+    if model_file:
+        with open(model_file + '.log', 'a') as file:
+            file.write('Maximum Number of Epochs Reached. Stopping Training.\n')
+    print('Maximum Number of Epochs Reached. Stopping Training.')
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lang', nargs=2, metavar='LANG', required=True, help='source/target language')
+    parser.add_argument('--lang', nargs=2, required=True, help='source/target language')
     parser.add_argument('--data', metavar='FILE', help='training data')
     parser.add_argument('--test', metavar='FILE', help='validation data')
     parser.add_argument('--vocab', metavar='FILE', help='shared vocab')
-    parser.add_argument('--config', metavar='FILE', default='model.config', help='model config')
+    parser.add_argument('--config', metavar='FILE', help='model config')
     parser.add_argument('--load', metavar='FILE', help='load state_dict')
     parser.add_argument('--save', metavar='FILE', help='save state_dict')
     parser.add_argument('--seed', type=int, help='random seed')
@@ -85,6 +94,8 @@ def main():
         torch.manual_seed(args.seed)
 
     src_lang, tgt_lang = args.lang
+    if not args.config:
+        args.config = 'model.config'
     with open(args.config) as file:
         config = toml.load(file)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -92,7 +103,10 @@ def main():
     for i, arg in enumerate(unknown):
         if arg[:2] == '--' and arg[2:] in config:
             if len(unknown) >= i + 1:
-                config[arg[2:]] = int(unknown[i + 1])
+                try:
+                    config[arg[2:]] = int(unknown[i + 1])
+                except ValueError:
+                    config[arg[2:]] = float(unknown[i + 1])
 
     if not args.data:
         args.data = f'data/training/train.tok.bpe.{src_lang}{tgt_lang}'
@@ -115,9 +129,8 @@ def main():
     )
     if args.load:
         manager.load_model(args.load)
-    tokenizer = Tokenizer(src_lang, tgt_lang)
 
-    train_model(manager, tokenizer, args.save, feedback=args.tqdm)
+    train_model(manager, args.save, feedback=args.tqdm)
 
 if __name__ == '__main__':
     import argparse

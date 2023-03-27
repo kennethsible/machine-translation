@@ -2,20 +2,6 @@ from layers import PositionalEncoding, MultiHeadAttention, \
     Embedding, LogSoftmax, ScaleNorm, FeedForward, clone
 import torch, torch.nn as nn
 
-class EarlyStopping:
-
-    def __init__(self, patience, min_delta):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-
-    def __call__(self, curr_loss, prev_loss):
-        if (curr_loss - prev_loss) > self.min_delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                return True
-        return False
-
 class SublayerConnection(nn.Module):
 
     def __init__(self, scale, dropout):
@@ -28,11 +14,11 @@ class SublayerConnection(nn.Module):
 
 class EncoderLayer(nn.Module):
 
-    def __init__(self, d_model, d_ff, n_heads, dropout):
+    def __init__(self, embed_dim, ff_dim, num_heads, dropout):
         super(EncoderLayer, self).__init__()
-        self.self_att = MultiHeadAttention(n_heads, d_model)
-        self.ff = FeedForward(d_model, d_ff, dropout)
-        scale = torch.tensor(d_model, dtype=torch.float32)
+        self.self_att = MultiHeadAttention(embed_dim, num_heads, dropout)
+        self.ff = FeedForward(embed_dim, ff_dim, dropout)
+        scale = torch.tensor(embed_dim, dtype=torch.float32)
         self.sublayers = clone(SublayerConnection(torch.sqrt(scale), dropout), 2)
 
     def forward(self, x, src_mask):
@@ -41,10 +27,10 @@ class EncoderLayer(nn.Module):
 
 class Encoder(nn.Module):
 
-    def __init__(self, d_model, d_ff, n_heads, dropout, n_layers):
+    def __init__(self, embed_dim, ff_dim, num_heads, num_layers, dropout):
         super(Encoder, self).__init__()
-        self.layers = clone(EncoderLayer(d_model, d_ff, n_heads, dropout), n_layers)
-        scale = torch.tensor(d_model, dtype=torch.float32)
+        self.layers = clone(EncoderLayer(embed_dim, ff_dim, num_heads, dropout), num_layers)
+        scale = torch.tensor(embed_dim, dtype=torch.float32)
         self.norm = ScaleNorm(torch.sqrt(scale))
 
     def forward(self, x, src_mask):
@@ -54,12 +40,12 @@ class Encoder(nn.Module):
 
 class DecoderLayer(nn.Module):
 
-    def __init__(self, d_model, d_ff, n_heads, dropout):
+    def __init__(self, embed_dim, ff_dim, num_heads, dropout):
         super(DecoderLayer, self).__init__()
-        self.self_att = MultiHeadAttention(n_heads, d_model)
-        self.crss_att = MultiHeadAttention(n_heads, d_model)
-        self.ff = FeedForward(d_model, d_ff, dropout)
-        scale = torch.tensor(d_model, dtype=torch.float32)
+        self.self_att = MultiHeadAttention(embed_dim, num_heads, dropout)
+        self.crss_att = MultiHeadAttention(embed_dim, num_heads, dropout)
+        self.ff = FeedForward(embed_dim, ff_dim, dropout)
+        scale = torch.tensor(embed_dim, dtype=torch.float32)
         self.sublayers = clone(SublayerConnection(torch.sqrt(scale), dropout), 3)
 
     def forward(self, x, m, src_mask, tgt_mask):
@@ -69,10 +55,10 @@ class DecoderLayer(nn.Module):
 
 class Decoder(nn.Module):
 
-    def __init__(self, d_model, d_ff, n_heads, dropout, n_layers):
+    def __init__(self, embed_dim, ff_dim, num_heads, num_layers, dropout):
         super(Decoder, self).__init__()
-        self.layers = clone(DecoderLayer(d_model, d_ff, n_heads, dropout), n_layers)
-        scale = torch.tensor(d_model, dtype=torch.float32)
+        self.layers = clone(DecoderLayer(embed_dim, ff_dim, num_heads, dropout), num_layers)
+        scale = torch.tensor(embed_dim, dtype=torch.float32)
         self.norm = ScaleNorm(torch.sqrt(scale))
 
     def forward(self, x, src_encs, src_mask, tgt_mask):
@@ -82,17 +68,14 @@ class Decoder(nn.Module):
 
 class Model(nn.Module):
 
-    def __init__(self, vocab_size, d_model=512, d_ff=2048, n_heads=8, dropout=0.1, n_layers=6):
+    def __init__(self, vocab_size, embed_dim=512, ff_dim=2048, num_heads=8, num_layers=6, dropout=0.3):
         super(Model, self).__init__()
         self.vocab_size = vocab_size
-        self.encoder = Encoder(d_model, d_ff, n_heads, dropout, n_layers)
-        self.decoder = Decoder(d_model, d_ff, n_heads, dropout, n_layers)
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
-        self.src_embed = nn.Sequential(Embedding(d_model, vocab_size), PositionalEncoding(d_model, dropout))
-        self.tgt_embed = nn.Sequential(Embedding(d_model, vocab_size), PositionalEncoding(d_model, dropout))
-        self.generator = LogSoftmax(d_model, vocab_size)
+        self.encoder = Encoder(embed_dim, ff_dim, num_heads, num_layers, dropout)
+        self.decoder = Decoder(embed_dim, ff_dim, num_heads, num_layers, dropout)
+        self.src_embed = nn.Sequential(Embedding(embed_dim, vocab_size), PositionalEncoding(embed_dim, dropout))
+        self.tgt_embed = nn.Sequential(Embedding(embed_dim, vocab_size), PositionalEncoding(embed_dim, dropout))
+        self.generator = LogSoftmax(embed_dim, vocab_size)
 
     def forward(self, src_nums, tgt_nums, src_mask, tgt_mask):
         return self.decode(self.encode(src_nums, src_mask), tgt_nums, src_mask, tgt_mask)

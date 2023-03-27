@@ -1,5 +1,5 @@
 from manager import Tokenizer, Manager
-from decode import beam_search
+from decode import beam_decode
 import torch, toml
 
 def translate_file(infile, manager, tokenizer, model_file=None):
@@ -29,7 +29,7 @@ def translate_string(string, manager, tokenizer, model_file=None):
 
         src_nums = manager.vocab.numberize(*src_words).unsqueeze(0)
         src_encs = manager.model.encode(src_nums.to(manager.device), None)
-        out_nums = beam_search(manager, src_encs, None, manager.config['beam-width'])
+        out_nums = beam_decode(manager, src_encs, None, manager.config['beam-width'])
 
     return tokenizer.detokenize(manager.vocab.denumberize(*out_nums))
 
@@ -46,10 +46,10 @@ def interactive(manager, tokenizer, model_file=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lang', nargs=2, metavar='LANG', required=True, help='source/target language')
+    parser.add_argument('--lang', nargs=2, required=True, help='source/target language')
     parser.add_argument('--vocab', metavar='FILE', help='shared vocab')
     parser.add_argument('--codes', metavar='FILE', help='shared codes')
-    parser.add_argument('--config', metavar='FILE', default='model.config', help='model config')
+    parser.add_argument('--config', metavar='FILE', help='model config')
     parser.add_argument('--load', metavar='FILE', help='load state_dict')
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--file', metavar='FILE', help='input file')
@@ -58,6 +58,8 @@ def main():
     args, unknown = parser.parse_known_args()
 
     src_lang, tgt_lang = args.lang
+    if not args.config:
+        args.config = 'model.config'
     with open(args.config) as file:
         config = toml.load(file)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -65,7 +67,10 @@ def main():
     for i, arg in enumerate(unknown):
         if arg[:2] == '--' and arg[2:] in config:
             if len(unknown) >= i + 1:
-                config[arg[2:]] = int(unknown[i + 1])
+                try:
+                    config[arg[2:]] = int(unknown[i + 1])
+                except ValueError:
+                    config[arg[2:]] = float(unknown[i + 1])
 
     if not args.vocab:
         args.vocab = f'data/vocab.{src_lang}{tgt_lang}'

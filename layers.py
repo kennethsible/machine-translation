@@ -18,9 +18,9 @@ class Linear(nn.Module):
 
 class LogSoftmax(nn.Module):
 
-    def __init__(self, d_model, vocab):
+    def __init__(self, embed_dim, vocab_size):
         super(LogSoftmax, self).__init__()
-        self.weight = nn.Parameter(torch.empty(vocab, d_model))
+        self.weight = nn.Parameter(torch.empty(vocab_size, embed_dim))
         nn.init.normal_(self.weight, std=0.01)
 
     def forward(self, x):
@@ -30,9 +30,9 @@ class LogSoftmax(nn.Module):
 
 class Embedding(nn.Module):
 
-    def __init__(self, d_model, vocab):
+    def __init__(self, embed_dim, vocab_size):
         super(Embedding, self).__init__()
-        self.weight = nn.Parameter(torch.empty(vocab, d_model))
+        self.weight = nn.Parameter(torch.empty(vocab_size, embed_dim))
         nn.init.normal_(self.weight, std=0.01)
 
     def forward(self, x):
@@ -41,13 +41,13 @@ class Embedding(nn.Module):
 
 class PositionalEncoding(nn.Module):
 
-    def __init__(self, d_model, dropout, max_len=5000):
+    def __init__(self, embed_dim, dropout, max_len=5000):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(dropout)
 
-        enc = torch.zeros(max_len, d_model, requires_grad=False)
+        enc = torch.zeros(max_len, embed_dim, requires_grad=False)
         position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000) / d_model))
+        div_term = torch.exp(torch.arange(0, embed_dim, 2) * -(math.log(10000) / embed_dim))
         enc[:, 0::2] = torch.sin(position * div_term)
         enc[:, 1::2] = torch.cos(position * div_term)
         self.register_buffer('enc', enc.unsqueeze(0))
@@ -55,16 +55,6 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         x = x + self.enc[:, : x.size(1)]
         return self.dropout(x)
-
-class CrossEntropy(nn.Module):
-
-    def __init__(self, smoothing):
-        super(CrossEntropy, self).__init__()
-        self.smoothing = smoothing
-
-    def forward(self, input, target):
-        l = torch.gather(input, dim=-1, index=target.unsqueeze(-1))
-        return (self.smoothing - 1) * l.sum() - self.smoothing * input.mean()
 
 class LayerNorm(nn.Module):
 
@@ -91,10 +81,10 @@ class ScaleNorm(nn.Module):
 
 class FeedForward(nn.Module):
 
-    def __init__(self, d_model, d_ff, dropout=0.1):
+    def __init__(self, embed_dim, ff_dim, dropout):
         super(FeedForward, self).__init__()
-        self.ff_1 = Linear(d_model, d_ff)
-        self.ff_2 = Linear(d_ff, d_model)
+        self.ff_1 = Linear(embed_dim, ff_dim)
+        self.ff_2 = Linear(ff_dim, embed_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -103,30 +93,29 @@ class FeedForward(nn.Module):
 def attention(query, key, value, mask=None, dropout=None):
         d_k = query.size(-1)
         scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
-        if mask is not None: # TODO Score Caching
+        if mask is not None:
             scores = scores.masked_fill(mask == 0, -torch.inf)
         scores = torch.softmax(scores, dim=-1)
-        if dropout: scores = dropout(scores)
+        if dropout is not None:
+            scores = dropout(scores)
         return scores @ value
 
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, n_heads, d_model, dropout=0.1):
+    def __init__(self, embed_dim, num_heads, dropout):
         super(MultiHeadAttention, self).__init__()
-        assert d_model % n_heads == 0
-        self.d_k = d_model // n_heads
-        self.n_heads = n_heads
-        self.linears = clone(Linear(d_model, d_model), 4)
+        assert embed_dim % num_heads == 0
+        self.d_k = embed_dim // num_heads
+        self.linears = clone(Linear(embed_dim, embed_dim), 4)
         self.dropout = nn.Dropout(dropout)
+        self.num_heads = num_heads
 
     def forward(self, query, key, value, mask=None):
         if mask is not None:
             mask = mask.unsqueeze(1)
-        n_batches = query.size(0)
-        query, key, value = [
-            linear(x).view(n_batches, -1, self.n_heads, self.d_k).transpose(1, 2)
-            for linear, x in zip(self.linears, (query, key, value))
-        ]
+        num_batches = query.size(0)
+        query, key, value = [linear(x).view(num_batches, -1, self.num_heads, self.d_k).transpose(1, 2)
+            for linear, x in zip(self.linears, (query, key, value))]
         x = attention(query, key, value, mask, self.dropout)
-        x = x.transpose(1, 2).reshape(n_batches, -1, self.n_heads * self.d_k)
+        x = x.transpose(1, 2).reshape(num_batches, -1, self.num_heads * self.d_k)
         return self.linears[-1](x)

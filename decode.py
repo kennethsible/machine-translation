@@ -1,7 +1,7 @@
 from manager import triu_mask
 import torch
 
-def greedy_search(manager, src_encs, src_mask, max_length=512):
+def greedy_decode(manager, src_encs, src_mask, max_length=512):
     path = torch.full((1, max_length), manager.vocab.bos, device=manager.device)
     tgt_mask = triu_mask(max_length, device=manager.device)
     for i in range(1, max_length):
@@ -12,8 +12,8 @@ def greedy_search(manager, src_encs, src_mask, max_length=512):
         if path[0, i] == manager.vocab.eos: break
     return path.squeeze(0)
 
-def beam_search(manager, src_encs, src_mask, beam_width, max_length=512):
-    if beam_width == 1: return greedy_search(manager, src_encs, src_mask, max_length)
+def beam_decode(manager, src_encs, src_mask, beam_width, max_length=512):
+    if beam_width == 1: return greedy_decode(manager, src_encs, src_mask, max_length)
 
     finished = torch.zeros(1, dtype=torch.bool, device=manager.device)
     paths = torch.full((1, max_length), manager.vocab.bos, device=manager.device)

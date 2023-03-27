@@ -1,6 +1,6 @@
 from sacrebleu.metrics import BLEU, CHRF
 from manager import Manager, Tokenizer
-from decode import beam_search
+from decode import beam_decode
 from datetime import timedelta
 import torch, time, toml
 
@@ -18,7 +18,7 @@ def score_model(manager, tokenizer, model_file=None, *, indent=0):
             src_encs = manager.model.encode(src_nums, src_mask)
 
             for i in range(src_encs.size(0)):
-                out_nums = beam_search(manager, src_encs[i], src_mask[i], manager.config['beam-width'])
+                out_nums = beam_decode(manager, src_encs[i], src_mask[i], manager.config['beam-width'])
                 reference.append(tokenizer.detokenize(manager.vocab.denumberize(*tgt_nums[i])))
                 candidate.append(tokenizer.detokenize(manager.vocab.denumberize(*out_nums)))
 
@@ -26,24 +26,29 @@ def score_model(manager, tokenizer, model_file=None, *, indent=0):
     chrf_score = chrf.corpus_score(candidate, [reference])
     elapsed = timedelta(seconds=(time.perf_counter() - start))
 
-    status_update = indent * ' ' + f'BLEU = {bleu_score.score} | chrF2 = {chrf_score.score} | Decode Time: {elapsed}'
+    checkpoint = indent * ' '
+    checkpoint += f'BLEU = {bleu_score.score:.4e}'
+    checkpoint += f' | chrF2 = {chrf_score.score:.4e}'
+    checkpoint += f' | Elapsed Time = {elapsed}'
     if model_file:
         with open(model_file + '.log', 'a') as file:
-            file.write(status_update + '\n')
-    print(status_update)
+            file.write(checkpoint + '\n')
+    print(checkpoint)
 
     return bleu_score, chrf_score, candidate
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lang', nargs=2, metavar='LANG', required=True, help='source/target language')
+    parser.add_argument('--lang', nargs=2, required=True, help='source/target language')
     parser.add_argument('--data', metavar='FILE', help='testing data')
     parser.add_argument('--vocab', metavar='FILE', help='shared vocab')
-    parser.add_argument('--config', metavar='FILE', default='model.config', help='model config')
+    parser.add_argument('--config', metavar='FILE', help='model config')
     parser.add_argument('--load', metavar='FILE', help='load state_dict')
     args, unknown = parser.parse_known_args()
 
     src_lang, tgt_lang = args.lang
+    if not args.config:
+        args.config = 'model.config'
     with open(args.config) as file:
         config = toml.load(file)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -51,7 +56,10 @@ def main():
     for i, arg in enumerate(unknown):
         if arg[:2] == '--' and arg[2:] in config:
             if len(unknown) >= i + 1:
-                config[arg[2:]] = int(unknown[i + 1])
+                try:
+                    config[arg[2:]] = int(unknown[i + 1])
+                except ValueError:
+                    config[arg[2:]] = float(unknown[i + 1])
 
     if not args.data:
         args.data = f'data/testing/test.tok.bpe.{src_lang}{tgt_lang}'

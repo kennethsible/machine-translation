@@ -3,12 +3,12 @@ from score import score_model
 from datetime import timedelta
 import torch, random, time, tqdm, toml
 
-def train_epoch(data, model, criterion, optimizer=None, *, mode='train'):
+def train_epoch(manager, criterion, optimizer=None, feedback=True, *, mode='train'):
     total_loss = 0.
-    for batch in data:
+    for batch in tqdm.tqdm(manager.data) if feedback else manager.data:
         src_nums, src_mask = batch.src_nums, batch.src_mask
         tgt_nums, tgt_mask = batch.tgt_nums, batch.tgt_mask
-        logits = model(src_nums, src_mask, tgt_nums[:, :-1], tgt_mask)
+        logits = manager.model(src_nums, src_mask, tgt_nums[:, :-1], tgt_mask, manager.output_dim)
         loss = criterion(torch.flatten(logits, 0, 1), torch.flatten(tgt_nums[:, 1:]))
 
         if optimizer and mode == 'train':
@@ -20,8 +20,8 @@ def train_epoch(data, model, criterion, optimizer=None, *, mode='train'):
         del logits, loss
     return total_loss
 
-def train_model(manager, tokenizer, model_file=None, feedback=False):
-    criterion = torch.nn.CrossEntropyLoss(label_smoothing=manager.config['label_smoothing'])
+def train_model(manager, tokenizer, model_file=None, feedback=True):
+    criterion = torch.nn.CrossEntropyLoss(label_smoothing=manager.config['label_smoothing'], ignore_index=manager.vocab.PAD)
     optimizer = torch.optim.Adam(manager.model.parameters(), lr=manager.config['lr'])
 
     best_loss, patience = torch.inf, 0
@@ -36,20 +36,18 @@ def train_model(manager, tokenizer, model_file=None, feedback=False):
         start = time.perf_counter()
         manager.model.train()
         train_loss = train_epoch(
-            tqdm.tqdm(manager.data) if feedback else manager.data,
-            manager.model,
+            manager,
             criterion,
             optimizer,
+            feedback,
             mode='train'
         )
 
         manager.model.eval()
         with torch.no_grad():
             val_loss = train_epoch(
-                manager.test,
-                manager.model,
+                manager,
                 criterion,
-                optimizer=None,
                 mode='eval',
             )
         elapsed = timedelta(seconds=(time.perf_counter() - start))

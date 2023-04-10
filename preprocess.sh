@@ -105,7 +105,55 @@ done
 echo -e "\n[7/10] Learning BPE for Subword Tokenization..."
 cat "data/training/data.tok.$src_lang" "data/training/data.tok.$tgt_lang" \
     | subword-nmt learn-bpe -s $merge_ops -o "data/codes.$src_lang$tgt_lang"
-ln -s "codes.$src_lang$tgt_lang" "data/codes.$tgt_lang$src_lang"
+cp "data/codes.$src_lang$tgt_lang" "data/codes.$tgt_lang$src_lang"
+
+function build_vocab {
+    output="$(python - << END
+src_data = set()
+with open('$3/data.tok.bpe.$1') as src_file:
+    for line in src_file.readlines():
+        src_data.update(line.split())
+
+tgt_data = set()
+with open('$3/data.tok.bpe.$2') as tgt_file:
+    for line in tgt_file.readlines():
+        tgt_data.update(line.split())
+
+src_only, tgt_only, src_tgt = [], [], []
+with open('data/vocab.$1$2') as vocab_file:
+    for line in vocab_file.readlines():
+        token = line.split()[0]
+        in_src = token in src_data
+        in_tgt = token in tgt_data
+        token += '\n'
+
+        if in_src and not in_tgt:
+            src_only.append(token)
+        elif in_tgt and not in_src:
+            tgt_only.append(token)
+        else:
+            src_tgt.append(token)
+
+with open('data/vocab.$1$2', 'w') as vocab_file:
+    tgt_loc = len(src_tgt) + 2
+    src_loc = tgt_loc + len(tgt_only)
+    vocab_file.write(f'#{tgt_loc};{src_loc}\n')
+    vocab_file.writelines(src_tgt)
+    vocab_file.writelines(tgt_only)
+    vocab_file.writelines(src_only)
+
+src_only, tgt_only = tgt_only, src_only
+with open('data/vocab.$2$1', 'w') as vocab_file:
+    tgt_loc = len(src_tgt) + 2
+    src_loc = tgt_loc + len(tgt_only)
+    vocab_file.write(f'#{tgt_loc};{src_loc}\n')
+    vocab_file.writelines(src_tgt)
+    vocab_file.writelines(tgt_only)
+    vocab_file.writelines(src_only)
+END
+)"
+    eval "$output"
+}
 
 echo -e "\n[8/10] Applying BPE Subword Tokenization..."
 for path in "data/training" "data/validation" "data/testing"; do
@@ -114,7 +162,7 @@ for path in "data/training" "data/validation" "data/testing"; do
 done
 cat "data/training/data.tok.bpe.$src_lang" "data/training/data.tok.bpe.$tgt_lang" \
     | subword-nmt get-vocab > "data/vocab.$src_lang$tgt_lang"
-ln -s "vocab.$src_lang$tgt_lang" "data/vocab.$tgt_lang$src_lang"
+build_vocab "$src_lang" "$tgt_lang" "data/training"
 wc -l "data/vocab.$src_lang$tgt_lang"
 
 echo -e "\n[9/10] Combining Source and Target Data..."

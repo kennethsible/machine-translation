@@ -91,7 +91,7 @@ class Model(nn.Module):
         tgt_embs = self.tgt_embed(tgt_nums)
         return self.decoder(tgt_embs, tgt_mask, src_encs, src_mask)
 
-    def forward(self, src_nums, src_mask, tgt_nums, tgt_mask, softmax=False):
+    def forward(self, src_nums, src_mask, tgt_nums, tgt_mask, output_dim=None, log_softmax=False):
         src_encs = self.encode(src_nums, src_mask)
         tgt_encs = self.decode(tgt_nums, tgt_mask, src_encs, src_mask)
-        return self.generator(tgt_encs, softmax)
+        return self.generator(tgt_encs, output_dim, log_softmax)

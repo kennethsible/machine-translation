@@ -25,13 +25,29 @@ class Tokenizer:
 
 class Vocab:
 
-    def __init__(self):
-        self.num_to_word = ['<UNK>', '<BOS>', '<EOS>', '<PAD>']
-        self.word_to_num = {word: i for i, word in enumerate(self.num_to_word)}
-        self.UNK = self.word_to_num['<UNK>']
-        self.BOS = self.word_to_num['<BOS>']
-        self.EOS = self.word_to_num['<EOS>']
-        self.PAD = self.word_to_num['<PAD>']
+    def __init__(self, initialize=True):
+        if initialize:
+            self.num_to_word = ['<UNK>', '<BOS>', '<EOS>', '<PAD>']
+            self.word_to_num = {word: i for i, word in enumerate(self.num_to_word)}
+        else:
+            self.num_to_word = []
+            self.word_to_num = {}
+
+    @property
+    def UNK(self):
+        return self.word_to_num['<UNK>']
+
+    @property
+    def BOS(self):
+        return self.word_to_num['<BOS>']
+
+    @property
+    def EOS(self):
+        return self.word_to_num['<EOS>']
+
+    @property
+    def PAD(self):
+        return self.word_to_num['<PAD>']
 
     def add(self, word):
         try:
@@ -123,11 +139,20 @@ class Manager:
         self.config = config
         self.device = device
 
-        self.vocab = Vocab()
+        self.vocab = Vocab(initialize=False)
         with open(vocab_file) as file:
-            for line in file:
+            # <UNK> SRC-TGT <EOS> TGT-ONLY <BOS> SRC-ONLY <PAD>
+            tgt_loc, src_loc = file.readline().lstrip('#').split(';')
+            tgt_loc, src_loc = int(tgt_loc), int(src_loc)
+            self.vocab.add('<UNK>')
+            for i, line in enumerate(file):
+                if i == src_loc - 2:
+                    self.vocab.add('<BOS>')
+                elif i == tgt_loc - 2:
+                    self.vocab.add('<EOS>')
                 self.vocab.add(line.split()[0])
-        assert self.vocab.size() > 0
+            self.vocab.add('<PAD>')
+        self.output_dim = src_loc
 
         self.model = Model(
             self.vocab.size(),

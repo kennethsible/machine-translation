@@ -45,14 +45,14 @@ class Linear(nn.Module):
 
 class LogSoftmax(nn.Module):
 
-    def __init__(self, embed_dim, vocab_size):
+    def __init__(self, embed_dim, vocab_dim):
         super(LogSoftmax, self).__init__()
-        self.weights = nn.Parameter(torch.empty(vocab_size, embed_dim))
+        self.weights = nn.Parameter(torch.empty(vocab_dim, embed_dim))
         nn.init.uniform_(self.weights, -0.01, 0.01)
 
-    def forward(self, inputs, softmax=True):
-        weights = nn.functional.normalize(self.weights, dim=-1)
-        if not softmax:
+    def forward(self, inputs, output_dim=None, log_softmax=True):
+        weights = nn.functional.normalize(self.weights, dim=-1)[:output_dim]
+        if not log_softmax:
             return inputs @ weights.transpose(0, 1)
         return torch.log_softmax(inputs @ weights.transpose(0, 1), dim=-1)
 

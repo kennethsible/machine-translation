@@ -6,7 +6,7 @@ def greedy_decode(manager, src_encs, src_mask, max_length=512):
     tgt_mask = triu_mask(max_length, device=manager.device)
     for i in range(1, max_length):
         tgt_encs = manager.model.decode(path[:, :i], tgt_mask[:, :i, :i], src_encs, src_mask)
-        scores = manager.model.generator(tgt_encs[:, -1, :])
+        scores = manager.model.generator(tgt_encs[:, -1, :], manager.output_dim)
         path[0, i] = torch.argmax(scores, dim=-1).unsqueeze(0)
         if path[0, i] == manager.vocab.EOS: break
     return path.squeeze(0)
@@ -25,7 +25,8 @@ def beam_decode(manager, src_encs, src_mask, beam_width, max_length=512):
     for i in range(1, max_length):
         tgt_encs = manager.model.decode(paths[~inactive, :i], tgt_mask[:, :i, :i],
             src_encs.expand(beam_width, -1, -1), src_mask)
-        scores = manager.model.generator(tgt_encs[:, -1, :]) + probs[~inactive].unsqueeze(1)
+        scores = manager.model.generator(tgt_encs[:, -1, :], manager.output_dim)
+        scores += probs[~inactive].unsqueeze(1)
         if i == 1:
             inactive = inactive.repeat(max_width)
             paths = paths.repeat(max_width, 1)
@@ -51,5 +52,4 @@ def beam_decode(manager, src_encs, src_mask, beam_width, max_length=512):
         inactive |= finished
         beam_width = (~inactive).count_nonzero()
         if inactive.all(): break
-
     return paths[probs.argmax()]

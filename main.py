@@ -1,26 +1,36 @@
-from manager import Manager
-from model import train_epoch
+from manager import Manager, Tokenizer
+from score import score_model
 from datetime import timedelta
 import torch, random, time, tqdm, toml
 
-def train_model(manager, model_file=None, *, feedback=False):
-    if model_file:
-        manager.model.src_embed[0].weight = manager.model.tgt_embed[0].weight
-        manager.model.generator.weight = manager.model.tgt_embed[0].weight
+def train_epoch(data, model, criterion, optimizer=None, *, mode='train'):
+    total_loss = 0.
+    for batch in data:
+        src_nums, src_mask = batch.src_nums, batch.src_mask
+        tgt_nums, tgt_mask = batch.tgt_nums, batch.tgt_mask
+        logits = model(src_nums, src_mask, tgt_nums[:, :-1], tgt_mask)
+        loss = criterion(torch.flatten(logits, 0, 1), torch.flatten(tgt_nums[:, 1:]))
 
-    criterion = torch.nn.CrossEntropyLoss(label_smoothing=manager.config['label-smoothing'])
+        if optimizer and mode == 'train':
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        total_loss += loss.item() / batch.num_tokens
+        del logits, loss
+    return total_loss
+
+def train_model(manager, tokenizer, model_file=None, feedback=False):
+    criterion = torch.nn.CrossEntropyLoss(label_smoothing=manager.config['label_smoothing'])
     optimizer = torch.optim.Adam(manager.model.parameters(), lr=manager.config['lr'])
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
-        factor=manager.config['decay-factor'], patience=manager.config['patience'])
 
-    prev_val_loss = torch.inf
-    for epoch in range(manager.config['max-epochs']):
+    best_loss, patience = torch.inf, 0
+    for epoch in range(manager.config['max_epochs']):
         if epoch > 0:
             if model_file:
                 with open(model_file + '.log', 'a') as file:
                     file.write('\n')
             print()
-
         random.shuffle(manager.data)
 
         start = time.perf_counter()
@@ -42,39 +52,39 @@ def train_model(manager, model_file=None, *, feedback=False):
                 optimizer=None,
                 mode='eval',
             )
-        scheduler.step(val_loss)
         elapsed = timedelta(seconds=(time.perf_counter() - start))
 
-        checkpoint = f'[{str(epoch + 1).rjust(len(str(manager.config["max-epochs"])), "0")}]'
+        checkpoint = f'[{str(epoch + 1).rjust(len(str(manager.config["max_epochs"])), "0")}]'
         checkpoint += f' Training PPL = {torch.exp(train_loss):.4e}'
         checkpoint += f' | Validation PPL = {torch.exp(val_loss):.4e}'
-        checkpoint += f' | Learning Rate = {optimizer.param_groups[0]["lr"]:.4e}'
         checkpoint += f' | Elapsed Time = {elapsed}'
         if model_file:
             with open(model_file + '.log', 'a') as file:
                 file.write(checkpoint + '\n')
         print(checkpoint)
 
-        # score_model(manager, tokenizer, model_file, indent=((epoch + 1) // 10 + 4))
-
-        if val_loss < prev_val_loss:
+        if val_loss < best_loss:
             manager.save_model(model_file)
             if model_file:
                 with open(model_file + '.log', 'a') as file:
-                    file.write('Saving Model Checkpoint.\n')
-            print('Saving Model Checkpoint.')
-            prev_val_loss = val_loss
-        if optimizer.param_groups[0]['lr'] < manager.config['min-lr']:
+                    file.write('Saving Model.\n')
+            print('Saving Model.')
+            best_loss, patience = val_loss, 0
+        else:
+            patience += 1
+
+        if patience >= manager.config['patience']:
             if model_file:
                 with open(model_file + '.log', 'a') as file:
-                    file.write('Minimum Learning Rate Reached. Stopping Training.\n')
-            print('Minimum Learning Rate Reached. Stopping Training.')
-            return
+                    file.write('Patience Reached for Early Stopping.\n')
+            print('Patience Reached for Early Stopping.')
+            return score_model(manager, tokenizer, model_file, indent=((epoch + 1) // 10 + 4))
 
     if model_file:
         with open(model_file + '.log', 'a') as file:
-            file.write('Maximum Number of Epochs Reached. Stopping Training.\n')
-    print('Maximum Number of Epochs Reached. Stopping Training.')
+            file.write('Maximum Number of Epochs Reached.\n')
+    print('Maximum Number of Epochs Reached.')
+    return score_model(manager, tokenizer, model_file, indent=((epoch + 1) // 10 + 4))
 
 def main():
     parser = argparse.ArgumentParser()
@@ -101,17 +111,14 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     for i, arg in enumerate(unknown):
-        if arg[:2] == '--' and arg[2:] in config:
-            if len(unknown) >= i + 1:
-                try:
-                    config[arg[2:]] = int(unknown[i + 1])
-                except ValueError:
-                    config[arg[2:]] = float(unknown[i + 1])
+        if arg[:2] == '--' and len(unknown) > i:
+            option, value = arg[2:], unknown[i + 1]
+            config[option] = (int if value.isdigit() else float)(value)
 
     if not args.data:
-        args.data = f'data/training/train.tok.bpe.{src_lang}{tgt_lang}'
+        args.data = f'data/training/data.tok.bpe.{src_lang}{tgt_lang}'
     if not args.test:
-        args.test = f'data/validation/val.tok.bpe.{src_lang}{tgt_lang}'
+        args.test = f'data/validation/data.tok.bpe.{src_lang}{tgt_lang}'
     if not args.vocab:
         args.vocab = f'data/vocab.{src_lang}{tgt_lang}'
     if not args.save:
@@ -123,14 +130,15 @@ def main():
         tgt_lang,
         config,
         device,
+        args.vocab,
         args.data,
-        args.test,
-        args.vocab
+        args.test
     )
     if args.load:
         manager.load_model(args.load)
+    tokenizer = Tokenizer(src_lang, tgt_lang)
 
-    train_model(manager, args.save, feedback=args.tqdm)
+    train_model(manager, tokenizer, args.save, args.tqdm)
 
 if __name__ == '__main__':
     import argparse

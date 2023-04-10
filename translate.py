@@ -2,47 +2,28 @@ from manager import Tokenizer, Manager
 from decode import beam_decode
 import torch, toml
 
-def translate_file(infile, manager, tokenizer, model_file=None):
-    if model_file:
-        manager.load_model(model_file)
-        manager.model.eval()
-
+def translate_file(infile, manager, tokenizer):
     with open(infile) as file:
         return [translate_string(line, manager, tokenizer) for line in file]
 
-def translate_string(string, manager, tokenizer, model_file=None):
-    if model_file:
-        manager.load_model(model_file)
-        manager.model.eval()
+def translate_string(string, manager, tokenizer):
+    src_words = ['<BOS>'] + tokenizer.tokenize(string).split() + ['<EOS>']
 
-    string = tokenizer.tokenize(string)
-    assert len(string) > 0
-
+    manager.model.eval()
     with torch.no_grad():
-        max_length = manager.config['max-length']
-        if max_length: max_length -= 2
-
-        src_words = string.split()
-        if max_length and len(src_words) > max_length:
-            src_words = src_words[:max_length]
-        src_words = ['<BOS>'] + src_words + ['<EOS>']
-
         src_nums = manager.vocab.numberize(*src_words).unsqueeze(0)
         src_encs = manager.model.encode(src_nums.to(manager.device), None)
-        out_nums = beam_decode(manager, src_encs, None, manager.config['beam-width'])
+        out_nums = beam_decode(manager, src_encs, None, manager.config['beam_width'])
 
     return tokenizer.detokenize(manager.vocab.denumberize(*out_nums))
 
-def interactive(manager, tokenizer, model_file=None):
-    if model_file:
-        manager.load_model(model_file)
-        manager.model.eval()
-
+def interactive(manager, tokenizer):
     print('Interactive Mode (Ctrl+C to Quit)')
     try:
         while True:
             print(translate_string(input('\n> '), manager, tokenizer))
-    except KeyboardInterrupt: pass
+    except KeyboardInterrupt:
+        pass
 
 def main():
     parser = argparse.ArgumentParser()
@@ -65,12 +46,9 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     for i, arg in enumerate(unknown):
-        if arg[:2] == '--' and arg[2:] in config:
-            if len(unknown) >= i + 1:
-                try:
-                    config[arg[2:]] = int(unknown[i + 1])
-                except ValueError:
-                    config[arg[2:]] = float(unknown[i + 1])
+        if arg[:2] == '--' and len(unknown) > i:
+            option, value = arg[2:], unknown[i + 1]
+            config[option] = (int if value.isdigit() else float)(value)
 
     if not args.vocab:
         args.vocab = f'data/vocab.{src_lang}{tgt_lang}'
@@ -84,10 +62,10 @@ def main():
         tgt_lang,
         config,
         device,
-        None,
-        None,
         args.vocab
     )
+    if args.load:
+        manager.load_model(args.load)
     tokenizer = Tokenizer(src_lang, tgt_lang, args.codes)
 
     if args.file:

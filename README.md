@@ -1,12 +1,12 @@
 # Neural Machine Translation in PyTorch
 **Ken Sible | [NLP Group](https://nlp.nd.edu)** | **University of Notre Dame**
 
-Note, any option in `model.config` can also be passed as a command line argument.
+Note, any option in `model.config` can also be passed as a command line argument,
 ```
-$ python translate.py --lang de en --beam_size 10 --string "Ich liebe Übersetzungen!"
+$ python translate.py --lang de en --beam_size 5 --string "..."
 ```
 
-Additionally, any command line output can be redirected from `stdout` to a file.
+and any output from `stdout` can be diverted using the output redirection operator.
 ```
 $ python translate.py --lang de en --file infile.txt > outfile.txt
 ```
@@ -63,16 +63,12 @@ embed_dim           = 512   # dimensions of embedding sublayers
 ff_dim              = 2048  # dimensions of feed-forward sublayers
 num_heads           = 8     # number of parallel attention heads
 num_layers          = 6     # number of encoder/decoder layers
-dropout             = 0.3   # dropout for feed-forward/attention sublayers
-max-epochs          = 50    # maximum number of epochs, halt training
-lr                  = 3e-4  # learning rate (step size of optimizer)
-patience            = 3     # number of epochs without improvement
-decay-factor        = 0.8   # if patience reached, lr *= decay-factor
-min-lr              = 5e-5  # minimum learning rate, halt training
-label-smoothing     = 0.1   # label smoothing (regularization technique)
-batch-size          = -1    # number of tokens (source + target) per batch;
-                            # if batch-size = -1, fill available GPU memory
-                            # using max-length and binary search
-max-length          = 256   # maximum sentence length (if batch-size = -1)
-beam-width          = 4     # beam search and length normalization
+dropout             = 0.1   # dropout for feed-forward/attention sublayers
+max_epochs          = 250   # maximum number of epochs (halt training)
+lr                  = 3e-4  # learning rate (step size of the optimizer)
+patience            = 3     # number of epochs tolerated w/o improvement
+label_smoothing     = 0.1   # label smoothing (regularization technique)
+batch_size          = 4096  # number of tokens per batch (source/target)
+max_length          = 256   # maximum sentence length (during training)
+beam_width          = 5     # beam search and length normalization
 ```

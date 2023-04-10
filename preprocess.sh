@@ -19,7 +19,39 @@ if [ -z "$src_lang" ] || [ -z "$tgt_lang" ] || [ -z "$merge_ops" ]; then
     exit 1
 fi
 
-function sgm_to_txt {
+mkdir -p data data/training
+
+echo "[1/10] Downloading WMT17 Training Data..."
+if [ $commoncrawl -eq 0 ] && [ $europarl_v7 -eq 0 ]; then
+    echo -e "$usage"
+    exit 1
+fi
+for path in "data/training"; do
+    if [ $commoncrawl -eq 1 ]; then
+        wget -q -O data/commoncrawl.tgz "https://www.statmt.org/wmt13/training-parallel-commoncrawl.tgz" --show-progress
+        tar -xzf data/commoncrawl.tgz -C data && rm data/commoncrawl.tgz
+        cat "data/commoncrawl.$src_lang-$tgt_lang.$src_lang" >> "$path/data.$src_lang"
+        cat "data/commoncrawl.$src_lang-$tgt_lang.$tgt_lang" >> "$path/data.$tgt_lang"
+        wc -l "$path/data.$src_lang"
+    fi
+
+    if [ $europarl_v7 -eq 1 ]; then
+        wget -q -O data/europarl-v7.tgz "http://www.statmt.org/europarl/v7/$src_lang-$tgt_lang.tgz" --show-progress
+        tar -xzf data/europarl-v7.tgz -C data && rm data/europarl-v7.tgz
+        cat "data/europarl-v7.$src_lang-$tgt_lang.$src_lang" >> "$path/data.$src_lang"
+        cat "data/europarl-v7.$src_lang-$tgt_lang.$tgt_lang" >> "$path/data.$tgt_lang"
+        wc -l "$path/data.$src_lang"
+    fi 
+done
+find data -maxdepth 1 -type f -delete
+
+echo -e "\n[2/10] Tokenizing Training Data..."
+for path in "data/training"; do
+    sacremoses -l $src_lang -j 4 tokenize < "$path/data.$src_lang" > "$path/data.tok.$src_lang"
+    sacremoses -l $tgt_lang -j 4 tokenize < "$path/data.$tgt_lang" > "$path/data.tok.$tgt_lang"
+done
+
+function sgm2txt {
     output="$(python - << END
 import re
 with open('$1') as infile:
@@ -34,90 +66,69 @@ END
     echo "$output\n"
 }
 
-mkdir -p data data/training
-
-echo "Downloading WMT17 Training Corpora..."
-if [ $commoncrawl -eq 0 ] && [ $europarl_v7 -eq 0 ]; then
-    echo -e "$usage"
-    exit 1
-fi
-for path in "data/training"; do
-    if [ $commoncrawl -eq 1 ]; then
-        wget -q -O data/commoncrawl.tgz "https://www.statmt.org/wmt13/training-parallel-commoncrawl.tgz" --show-progress
-        tar -xzf data/commoncrawl.tgz -C data && rm data/commoncrawl.tgz
-        cat "data/commoncrawl.$src_lang-$tgt_lang.$src_lang" >> "$path/train.$src_lang"
-        cat "data/commoncrawl.$src_lang-$tgt_lang.$tgt_lang" >> "$path/train.$tgt_lang"
-        wc -l "$path/train.$src_lang"
-    fi
-
-    if [ $europarl_v7 -eq 1 ]; then
-        wget -q -O data/europarl-v7.tgz "http://www.statmt.org/europarl/v7/$src_lang-$tgt_lang.tgz" --show-progress
-        tar -xzf data/europarl-v7.tgz -C data && rm data/europarl-v7.tgz
-        cat "data/europarl-v7.$src_lang-$tgt_lang.$src_lang" >> "$path/train.$src_lang"
-        cat "data/europarl-v7.$src_lang-$tgt_lang.$tgt_lang" >> "$path/train.$tgt_lang"
-        wc -l "$path/train.$src_lang"
-    fi
-
-    find data -maxdepth 1 -type f -delete
-done
-
-echo -e "\nDownloading WMT17 Validation Data..."
+echo -e "\n[3/10] Downloading WMT17 Validation Data..."
 wget -q -O data/dev.tgz "http://data.statmt.org/wmt17/translation-task/dev.tgz" --show-progress
 tar -xzf data/dev.tgz -C data && rm data/dev.tgz
 mv data/dev data/validation
 for path in "data/validation"; do
-    mv "$path/newstest2016-$src_lang$tgt_lang-src.$src_lang.sgm" "$path/val.$src_lang.sgm"
-    mv "$path/newstest2016-$src_lang$tgt_lang-ref.$tgt_lang.sgm" "$path/val.$tgt_lang.sgm"  
-    sgm_to_txt "$path/val.$src_lang.sgm" > "$path/val.$src_lang"
-    sgm_to_txt "$path/val.$tgt_lang.sgm" > "$path/val.$tgt_lang"
+    mv "$path/newstest2016-$src_lang$tgt_lang-src.$src_lang.sgm" "$path/data.$src_lang.sgm"
+    mv "$path/newstest2016-$src_lang$tgt_lang-ref.$tgt_lang.sgm" "$path/data.$tgt_lang.sgm"  
+    sgm2txt "$path/data.$src_lang.sgm" > "$path/data.$src_lang"
+    sgm2txt "$path/data.$tgt_lang.sgm" > "$path/data.$tgt_lang"
 done
-find data/validation -type f ! -name "*val.$src_lang" -and ! -name "*val.$tgt_lang" -delete
+find data/validation -type f ! -name "*data.$src_lang" -and ! -name "*data.$tgt_lang" -delete
 
-echo -e "\nDownloading WMT17 Testing Data..."
+echo -e "\n[4/10] Tokenizing Validation Data..."
+for path in "data/validation"; do
+    sacremoses -l $src_lang -j 4 tokenize < "$path/data.$src_lang" > "$path/data.tok.$src_lang"
+    sacremoses -l $tgt_lang -j 4 tokenize < "$path/data.$tgt_lang" > "$path/data.tok.$tgt_lang"
+done
+
+echo -e "\n[5/10] Downloading WMT17 Testing Data..."
 wget -q -O data/test.tgz "http://data.statmt.org/wmt17/translation-task/test.tgz" --show-progress
 tar -xzf data/test.tgz -C data && rm data/test.tgz
 mv data/test data/testing
 for path in "data/testing"; do
-    mv "$path/newstest2017-$src_lang$tgt_lang-src.$src_lang.sgm" "$path/test.$src_lang.sgm"
-    mv "$path/newstest2017-$src_lang$tgt_lang-ref.$tgt_lang.sgm" "$path/test.$tgt_lang.sgm"  
-    sgm_to_txt "$path/test.$src_lang.sgm" > "$path/test.$src_lang"
-    sgm_to_txt "$path/test.$tgt_lang.sgm" > "$path/test.$tgt_lang"
+    mv "$path/newstest2017-$src_lang$tgt_lang-src.$src_lang.sgm" "$path/data.$src_lang.sgm"
+    mv "$path/newstest2017-$src_lang$tgt_lang-ref.$tgt_lang.sgm" "$path/data.$tgt_lang.sgm"  
+    sgm2txt "$path/data.$src_lang.sgm" > "$path/data.$src_lang"
+    sgm2txt "$path/data.$tgt_lang.sgm" > "$path/data.$tgt_lang"
 done
-find data/testing -type f ! -name "*test.$src_lang" -and ! -name "*test.$tgt_lang" -delete
+find data/testing -type f ! -name "*data.$src_lang" -and ! -name "*data.$tgt_lang" -delete
 
-echo -e "\nPerforming Tokenization with Moses..."
-for path in "data/training/train" "data/validation/val" "data/testing/test"; do
-    sacremoses -l $src_lang -j 4 tokenize < "$path.$src_lang" > "$path.tok.$src_lang"
-    sacremoses -l $tgt_lang -j 4 tokenize < "$path.$tgt_lang" > "$path.tok.$tgt_lang"
+echo -e "\n[6/10] Tokenizing Testing Data..."
+for path in "data/testing"; do
+    sacremoses -l $src_lang -j 4 tokenize < "$path/data.$src_lang" > "$path/data.tok.$src_lang"
+    sacremoses -l $tgt_lang -j 4 tokenize < "$path/data.$tgt_lang" > "$path/data.tok.$tgt_lang"
 done
 
-echo -e "\nLearning BPE for Subword Tokenization..."
-cat "data/training/train.tok.$src_lang" "data/training/train.tok.$tgt_lang" \
+echo -e "\n[7/10] Learning BPE for Subword Tokenization..."
+cat "data/training/data.tok.$src_lang" "data/training/data.tok.$tgt_lang" \
     | subword-nmt learn-bpe -s $merge_ops -o "data/codes.$src_lang$tgt_lang"
 ln -s "codes.$src_lang$tgt_lang" "data/codes.$tgt_lang$src_lang"
 
-echo -e "\nPerforming Subword Tokenization with BPE..."
-for path in "data/training/train" "data/validation/val" "data/testing/test"; do
-    subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "$path.tok.$src_lang" > "$path.tok.bpe.$src_lang"
-    subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "$path.tok.$tgt_lang" > "$path.tok.bpe.$tgt_lang"
+echo -e "\n[8/10] Applying BPE Subword Tokenization..."
+for path in "data/training" "data/validation" "data/testing"; do
+    subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "$path/data.tok.$src_lang" > "$path/data.tok.bpe.$src_lang"
+    subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "$path/data.tok.$tgt_lang" > "$path/data.tok.bpe.$tgt_lang"
 done
-cat "data/training/train.tok.bpe.$src_lang" "data/training/train.tok.bpe.$tgt_lang" \
+cat "data/training/data.tok.bpe.$src_lang" "data/training/data.tok.bpe.$tgt_lang" \
     | subword-nmt get-vocab > "data/vocab.$src_lang$tgt_lang"
 ln -s "vocab.$src_lang$tgt_lang" "data/vocab.$tgt_lang$src_lang"
 wc -l "data/vocab.$src_lang$tgt_lang"
 
-echo -e "\nCombining Source and Target Data..."
-for path in "data/training/train" "data/validation/val" "data/testing/test"; do
-    paste "$path.tok.bpe.$src_lang" "$path.tok.bpe.$tgt_lang" > "$path.tok.bpe.$src_lang$tgt_lang"
-    paste "$path.tok.bpe.$tgt_lang" "$path.tok.bpe.$src_lang" > "$path.tok.bpe.$tgt_lang$src_lang"
-    wc -l "$path.tok.bpe.$src_lang$tgt_lang"
+echo -e "\n[9/10] Combining Source and Target Data..."
+for path in "data/training" "data/validation" "data/testing"; do
+    paste "$path/data.tok.bpe.$src_lang" "$path/data.tok.bpe.$tgt_lang" > "$path/data.tok.bpe.$src_lang$tgt_lang"
+    paste "$path/data.tok.bpe.$tgt_lang" "$path/data.tok.bpe.$src_lang" > "$path/data.tok.bpe.$tgt_lang$src_lang"
+    wc -l "$path/data.tok.bpe.$src_lang$tgt_lang"
 done
 
-echo -e "\nCleaning WMT17 Parallel Data..."
-for path in "data/training/train" "data/validation/val" "data/testing/test"; do
-    awk -i inplace '!seen[$0]++' "$path.tok.bpe.$src_lang$tgt_lang"
-    awk -i inplace '!seen[$0]++' "$path.tok.bpe.$tgt_lang$src_lang"
-    wc -l "$path.tok.bpe.$src_lang$tgt_lang"
+echo -e "\n[10/10] Cleaning Parallel Data..."
+for path in "data/training" "data/validation" "data/testing"; do
+    awk -i inplace '!seen[$0]++' "$path/data.tok.bpe.$src_lang$tgt_lang"
+    awk -i inplace '!seen[$0]++' "$path/data.tok.bpe.$tgt_lang$src_lang"
+    wc -l "$path/data.tok.bpe.$src_lang$tgt_lang"
 done
 
 echo -e "\nDone."

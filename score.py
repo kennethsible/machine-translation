@@ -1,32 +1,43 @@
+from comet import download_model, load_from_checkpoint
 from sacrebleu.metrics import BLEU, CHRF
 from manager import Manager, Tokenizer
 from decode import beam_decode
 from datetime import timedelta
 import torch, time, toml
 
-bleu, chrf = BLEU(), CHRF()
-
-def score_model(manager, tokenizer, *, indent=0):
-    start = time.perf_counter()
+def score_model(manager, tokenizer, model_file=None, *, indent=0):
     candidate, reference = [], []
 
+    start = time.perf_counter()
     manager.model.eval()
     with torch.no_grad():
         for batch in manager.data:
             src_encs = manager.model.encode(batch.src_nums, batch.src_mask)
             for i in range(src_encs.size(0)):
                 out_nums = beam_decode(manager, src_encs[i], batch.src_mask[i], manager.config['beam_width'])
-                reference.append(tokenizer.detokenize(manager.vocab.denumberize(*batch.tgt_nums[i])))
-                candidate.append(tokenizer.detokenize(manager.vocab.denumberize(*out_nums)))
-
-    bleu_score = bleu.corpus_score(candidate, [reference])
-    chrf_score = chrf.corpus_score(candidate, [reference])
+                reference.append(tokenizer.detokenize(manager.vocab.denumberize(*batch.tgt_nums[i]), manager.tgt_lang))
+                candidate.append(tokenizer.detokenize(manager.vocab.denumberize(*out_nums), manager.tgt_lang))
     elapsed = timedelta(seconds=(time.perf_counter() - start))
 
+    bleu_score = BLEU().corpus_score(candidate, [reference])
+    chrf_score = CHRF().corpus_score(candidate, [reference])
+
+    samples, tokenizer = [], Tokenizer(manager.src_lang)
+    for i, batch in enumerate(manager.data):
+        for j, src_nums in enumerate(batch.src_nums):
+            src_words = tokenizer.detokenize(manager.vocab.denumberize(*src_nums), manager.src_lang)
+            samples.append({'src': src_words, 'mt': candidate[i + j], 'ref': reference[i + j]})
+    comet_model = load_from_checkpoint(download_model('Unbabel/wmt22-comet-da'))
+    comet_score = comet_model.predict(samples)['system_score']
+
     checkpoint = indent * ' '
-    checkpoint += f'BLEU = {bleu_score.score:.4e}'
-    checkpoint += f' | chrF2 = {chrf_score.score:.4e}'
+    checkpoint += f'BLEU = {bleu_score.score:.4f}'
+    checkpoint += f' | CHRF = {chrf_score.score:.4f}'
+    checkpoint += f' | COMET = {comet_score:.4f}'
     checkpoint += f' | Elapsed Time = {elapsed}'
+    if model_file:
+         with open(model_file + '.log', 'a') as file:
+             file.write(checkpoint + '\n')
     print(checkpoint)
 
     return bleu_score, chrf_score, candidate
@@ -56,6 +67,8 @@ def main():
         args.data = f'data/testing/data.tok.bpe.{src_lang}{tgt_lang}'
     if not args.vocab:
         args.vocab = f'data/vocab.{src_lang}{tgt_lang}'
+    if not args.load:
+        args.load = f'data/model.{src_lang}{tgt_lang}'
 
     manager = Manager(
         src_lang,

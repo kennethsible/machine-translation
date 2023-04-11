@@ -6,21 +6,24 @@ import math, re
 
 class Tokenizer:
 
-    def __init__(self, src_lang, tgt_lang, codes_file=None):
+    def __init__(self, src_lang, tgt_lang=None, codes_file=None):
         self.mt = MosesTokenizer(src_lang)
-        self.md = MosesDetokenizer(tgt_lang)
+        if tgt_lang:
+            self.md = MosesDetokenizer(tgt_lang)
+        else:
+            self.md = MosesDetokenizer(src_lang)
         if codes_file:
             with open(codes_file) as file:
                 self.bpe = BPE(file)
         else:
             self.bpe = None
 
-    def tokenize(self, input):
-        string = self.mt.tokenize(input, return_str=True)
+    def tokenize(self, text):
+        string = self.mt.tokenize(text, return_str=True)
         return self.bpe.process_line(string)
 
-    def detokenize(self, output):
-        string = self.md.detokenize(output)
+    def detokenize(self, tokens):
+        string = self.md.detokenize(tokens)
         return re.sub('(@@ )|(@@ ?$)', '', string)
 
 class Vocab:

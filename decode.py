@@ -15,7 +15,6 @@ def beam_decode(manager, src_encs, src_mask, beam_width, max_length=512):
     if beam_width == 1:
         return greedy_decode(manager, src_encs, src_mask, max_length)
 
-    vocab_dim = manager.model.generator.weights.size(0)
     inactive = torch.zeros(1, dtype=torch.bool, device=manager.device)
     paths = torch.full((1, max_length), manager.vocab.BOS, device=manager.device)
     probs = torch.zeros(1, device=manager.device)
@@ -43,8 +42,8 @@ def beam_decode(manager, src_encs, src_mask, beam_width, max_length=512):
                 beam_width = nonzero_count
                 topv, topi = torch.topk(scores.flatten(), beam_width)
 
-        paths[~inactive] = candidates[torch.div(topi, vocab_dim, rounding_mode='trunc')]
-        paths[~inactive, i] = topi % vocab_dim
+        paths[~inactive] = candidates[torch.trunc(topi / manager.output_dim)]
+        paths[~inactive, i] = topi % manager.output_dim
         probs[~inactive] = topv
 
         finished = (paths[:, i] == manager.vocab.EOS)

@@ -69,11 +69,11 @@ def main():
     tokenizer = Tokenizer(src_lang, tgt_lang, args.codes)
 
     if args.file:
-        print(*translate_file(args.file, manager, tokenizer, args.load), sep='\n')
+        print(*translate_file(args.file, manager, tokenizer), sep='\n')
     if args.string:
-        print(translate_string(args.string, manager, tokenizer, args.load))
+        print(translate_string(args.string, manager, tokenizer))
     elif args.interactive:
-        interactive(manager, tokenizer, args.load)
+        interactive(manager, tokenizer)
 
 if __name__ == '__main__':
     import argparse

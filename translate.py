@@ -1,48 +1,36 @@
-from manager import Tokenizer, Manager
+from manager import Manager
 from decode import beam_decode
 import torch, toml
 
-def translate_file(infile, manager, tokenizer):
-    with open(infile) as file:
-        return [translate_string(line, manager, tokenizer) for line in file]
+def translate_file(data_file, manager):
+    return [translate_string(line, manager) for line in data_file]
 
-def translate_string(string, manager, tokenizer):
-    src_words = ['<BOS>'] + tokenizer.tokenize(string).split() + ['<EOS>']
+def translate_string(string, manager):
+    model, vocab, device = manager.model, manager.vocab, manager.device
+    src_words = ['<BOS>'] + manager.tokenize(string).split() + ['<EOS>']
 
-    manager.model.eval()
+    model.eval()
     with torch.no_grad():
-        src_nums = manager.vocab.numberize(*src_words).unsqueeze(0)
-        src_encs = manager.model.encode(src_nums.to(manager.device), None)
-        out_nums = beam_decode(manager, src_encs, None, manager.config['beam_width'])
+        src_nums = vocab.numberize(*src_words).unsqueeze(0)
+        src_encs = model.encode(src_nums.to(device), None)
+        out_nums = beam_decode(manager, src_encs, None, manager.beam_size)
 
-    return tokenizer.detokenize(manager.vocab.denumberize(*out_nums))
-
-def interactive(manager, tokenizer):
-    print('Interactive Mode (Ctrl+C to Quit)')
-    try:
-        while True:
-            print(translate_string(input('\n> '), manager, tokenizer))
-    except KeyboardInterrupt:
-        pass
+    return manager.detokenize(vocab.denumberize(*out_nums))
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lang', nargs=2, required=True, help='source/target language')
-    parser.add_argument('--vocab', metavar='FILE', help='shared vocab')
-    parser.add_argument('--codes', metavar='FILE', help='shared codes')
-    parser.add_argument('--config', metavar='FILE', help='model config')
-    parser.add_argument('--load', metavar='FILE', help='load state_dict')
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--file', metavar='FILE', help='input file')
-    group.add_argument('--string', metavar='STRING', help='input string')
-    group.add_argument('--interactive', action='store_true', help='interactive session')
+    group.add_argument('--file', metavar='FILE', help='translate file')
+    group.add_argument('--string', metavar='STRING', help='translate string')
+    parser.add_argument('--model', metavar='FILE', required=True, help='load model')
     args, unknown = parser.parse_known_args()
 
-    src_lang, tgt_lang = args.lang
-    if not args.config:
-        args.config = 'model.config'
-    with open(args.config) as file:
-        config = toml.load(file)
+    model_dict = torch.load(args.model)
+    src_lang = model_dict['src_lang']
+    tgt_lang = model_dict['tgt_lang']
+    vocab_file = model_dict['vocab_file']
+    codes_file = model_dict['codes_file']
+    config = model_dict['config']
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     for i, arg in enumerate(unknown):
@@ -50,30 +38,15 @@ def main():
             option, value = arg[2:], unknown[i + 1]
             config[option] = (int if value.isdigit() else float)(value)
 
-    if not args.vocab:
-        args.vocab = f'data/vocab.{src_lang}{tgt_lang}'
-    if not args.codes:
-        args.codes = f'data/codes.{src_lang}{tgt_lang}'
-    if not args.load:
-        args.load = f'data/model.{src_lang}{tgt_lang}'
-
-    manager = Manager(
-        src_lang,
-        tgt_lang,
-        config,
-        device,
-        args.vocab
-    )
-    if args.load:
-        manager.load_model(args.load)
-    tokenizer = Tokenizer(src_lang, tgt_lang, args.codes)
+    manager = Manager(src_lang, tgt_lang, vocab_file, codes_file,
+        args.model, config, device, data_file=None, test_file=None)
 
     if args.file:
-        print(*translate_file(args.file, manager, tokenizer), sep='\n')
-    if args.string:
-        print(translate_string(args.string, manager, tokenizer))
-    elif args.interactive:
-        interactive(manager, tokenizer)
+        data_file = open(args.file)
+        print(*translate_file(data_file, manager), sep='\n')
+        data_file.close()
+    elif args.string:
+        print(translate_string(args.string, manager))
 
 if __name__ == '__main__':
     import argparse

@@ -1,55 +1,65 @@
 from sacremoses import MosesTokenizer, MosesDetokenizer
 from subword_nmt.apply_bpe import BPE
 from model import Model
-import torch, torch.nn as nn
-import math, re
-
-class Tokenizer:
-
-    def __init__(self, src_lang, tgt_lang=None, codes_file=None):
-        self.mt = MosesTokenizer(src_lang)
-        if tgt_lang:
-            self.md = MosesDetokenizer(tgt_lang)
-        else:
-            self.md = MosesDetokenizer(src_lang)
-        if codes_file:
-            with open(codes_file) as file:
-                self.bpe = BPE(file)
-        else:
-            self.bpe = None
-
-    def tokenize(self, text):
-        string = self.mt.tokenize(text, return_str=True)
-        return self.bpe.process_line(string)
-
-    def detokenize(self, tokens):
-        string = self.md.detokenize(tokens)
-        return re.sub('(@@ )|(@@ ?$)', '', string)
+from decode import triu_mask
+from io import StringIO
+import torch, math, re
+import torch.nn as nn
 
 class Vocab:
 
-    def __init__(self, initialize=True):
-        if initialize:
-            self.num_to_word = ['<UNK>', '<BOS>', '<EOS>', '<PAD>']
-            self.word_to_num = {word: i for i, word in enumerate(self.num_to_word)}
-        else:
-            self.num_to_word = []
-            self.word_to_num = {}
+    def __init__(self, vocab_file=None):
+        self.num_to_word = []
+        self.word_to_num = {}
+        self.split_point = None
+        if vocab_file:
+            self._from_file(vocab_file)
+
+    def _from_file(self, vocab_file):
+        # <UNK> SRC-TGT <EOS> TGT-ONLY <BOS> SRC-ONLY <PAD>
+        vocab_file.seek(0)
+        line = vocab_file.readline().lstrip('#').split(';')
+        tgt_loc, src_loc = int(line[0]), int(line[1])
+        self.add('<UNK>')
+        for i, line in enumerate(vocab_file):
+            if i == src_loc - 2:
+                self.add('<BOS>')
+            elif i == tgt_loc - 2:
+                self.add('<EOS>')
+            self.add(line.split()[0])
+        self.add('<PAD>')
+        self.split = src_loc
 
     @property
     def UNK(self):
+        try:
+            return self.word_to_num['<UNK>']
+        except ValueError:
+            self.add('<UNK>')
         return self.word_to_num['<UNK>']
 
     @property
     def BOS(self):
+        try:
+            return self.word_to_num['<BOS>']
+        except ValueError:
+            self.add('<BOS>')
         return self.word_to_num['<BOS>']
 
     @property
     def EOS(self):
+        try:
+            return self.word_to_num['<EOS>']
+        except ValueError:
+            self.add('<EOS>')
         return self.word_to_num['<EOS>']
 
     @property
     def PAD(self):
+        try:
+            return self.word_to_num['<PAD>']
+        except ValueError:
+            self.add('<PAD>')
         return self.word_to_num['<PAD>']
 
     def add(self, word):
@@ -111,7 +121,8 @@ class Batch:
 
     @property
     def src_mask(self):
-        if not self.ignore_index: return None
+        if not self.ignore_index:
+            return None
         return (self.src_nums != self.ignore_index).unsqueeze(-2)
 
     @property
@@ -130,81 +141,97 @@ class Batch:
     def size(self):
         return self._src_nums.size(0)
 
-def triu_mask(size, device=None):
-    mask = torch.ones((1, size, size), device=device)
-    return torch.triu(mask, diagonal=1) == 0
-
 class Manager:
 
-    def __init__(self, src_lang, tgt_lang, config, device, vocab_file, data_file=None, test_file=None):
+    def __init__(self, src_lang, tgt_lang, vocab_file, codes_file,
+            model_file, config, device, data_file=None, test_file=None):
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
+        self._model_file = model_file
+        self._vocab_file = vocab_file
+        self._codes_file = codes_file
         self.config = config
         self.device = device
 
-        self.vocab = Vocab(initialize=False)
-        with open(vocab_file) as file:
-            # <UNK> SRC-TGT <EOS> TGT-ONLY <BOS> SRC-ONLY <PAD>
-            tgt_loc, src_loc = file.readline().lstrip('#').split(';')
-            tgt_loc, src_loc = int(tgt_loc), int(src_loc)
-            self.vocab.add('<UNK>')
-            for i, line in enumerate(file):
-                if i == src_loc - 2:
-                    self.vocab.add('<BOS>')
-                elif i == tgt_loc - 2:
-                    self.vocab.add('<EOS>')
-                self.vocab.add(line.split()[0])
-            self.vocab.add('<PAD>')
-        self.output_dim = src_loc
+        for option, value in config.items():
+            self.__setattr__(option, value)
+
+        if not isinstance(vocab_file, str):
+            vocab_file.seek(0)
+            self._vocab_file = ''.join(vocab_file.readlines())
+        self.vocab = Vocab(StringIO(self._vocab_file))
+        if not isinstance(codes_file, str):
+            codes_file.seek(0)
+            self._codes_file = ''.join(codes_file.readlines())
+        self.codes = BPE(StringIO(self._codes_file))
 
         self.model = Model(
             self.vocab.size(),
-            config['embed_dim'],
-            config['ff_dim'],
-            config['num_heads'],
-            config['num_layers'],
-            config['dropout']
+            self.embed_dim,
+            self.ff_dim,
+            self.num_heads,
+            self.num_layers,
+            self.dropout
         ).to(device)
 
         if data_file:
-            self.data = self.load_data(data_file)
+            data_file.seek(0)
+            self.data = self.batch_data(data_file)
             assert len(self.data) > 0
         else:
             self.data = None
 
         if test_file:
-            self.test = self.load_data(test_file)
+            test_file.seek(0)
+            self.test = self.batch_data(test_file)
             assert len(self.test) > 0
         else:
             self.test = None
 
-    def load_model(self, model_file):
-        state_dict = torch.load(model_file, self.device)
-        self.model.load_state_dict(state_dict)
+    def tokenize(self, string, lang=None):
+        if lang is None:
+            lang = self.src_lang
+        tokens = MosesTokenizer(lang).tokenize(string)
+        return self.codes.process_line(' '.join(tokens))
 
-    def save_model(self, model_file):
-        state_dict = self.model.state_dict()
-        torch.save(state_dict, model_file)
+    def detokenize(self, tokens, lang=None):
+        if lang is None:
+            lang = self.tgt_lang
+        string = MosesDetokenizer(lang).detokenize(tokens)
+        return re.sub('(@@ )|(@@ ?$)', '', string)
 
-    def load_data(self, data):
-        max_length = self.config['max_length']
-        batch_size = self.config['batch_size']
+    def load_model(self):
+        model_dict = torch.load(self._model_file, self.device)
+        self.model.load_state_dict(model_dict['state_dict'])
+
+    def save_model(self):
+        model_dict = {
+            'state_dict': self.model.state_dict(),
+            'src_lang': self.src_lang,
+            'tgt_lang': self.tgt_lang,
+            'vocab_file': self._vocab_file,
+            'codes_file': self._codes_file,
+            'config': self.config
+        }
+        torch.save(model_dict, self._model_file)
+
+    def batch_data(self, data_file):
+        data_file.seek(0)
 
         unbatched, batched = [], []
-        with open(data) as file:
-            for line in file:
-                src_line, tgt_line = line.split('\t')
-                src_words = src_line.split()
-                tgt_words = tgt_line.split()
+        for line in data_file:
+            src_line, tgt_line = line.split('\t')
+            src_words = src_line.split()
+            tgt_words = tgt_line.split()
 
-                if not src_words or not tgt_words: continue
-                if max_length:
-                    if len(src_words) > max_length - 2: continue
-                    if len(tgt_words) > max_length - 2: continue
+            if not src_words or not tgt_words: continue
+            if self.max_length:
+                if len(src_words) > self.max_length - 2: continue
+                if len(tgt_words) > self.max_length - 2: continue
 
-                unbatched.append((
-                    ['<BOS>'] + src_words + ['<EOS>'],
-                    ['<BOS>'] + tgt_words + ['<EOS>']))
+            unbatched.append((
+                ['<BOS>'] + src_words + ['<EOS>'],
+                ['<BOS>'] + tgt_words + ['<EOS>']))
         unbatched.sort(key=lambda x: (len(x[0]), len(x[1])), reverse=True)
 
         i = n = 0
@@ -213,7 +240,7 @@ class Manager:
             tgt_len = len(unbatched[i][1])
 
             while True:
-                n = batch_size // max(src_len, tgt_len)
+                n = self.batch_size // max(src_len, tgt_len)
                 if n & (n - 1) != 0:
                     n = 2 ** (math.ceil(math.log2(n)) - 1)
     
@@ -233,4 +260,5 @@ class Manager:
 
             batched.append(Batch(src_nums, tgt_nums, self.device, self.vocab.PAD))
             i += n
+
         return batched

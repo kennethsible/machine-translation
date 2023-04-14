@@ -1,5 +1,5 @@
 from layers import PositionalEncoding, MultiHeadAttention, \
-    Embedding, LogSoftmax, FeedForward, ScaleNorm, clone
+    Embedding, Generator, FeedForward, ScaleNorm, clone
 import torch, torch.nn as nn
 
 class SublayerConnection(nn.Module):
@@ -10,8 +10,8 @@ class SublayerConnection(nn.Module):
         self.norm = ScaleNorm(torch.sqrt(scale))
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, inputs, sublayer):
-        return inputs + self.dropout(sublayer(self.norm(inputs)))
+    def forward(self, x, sublayer):
+        return x + self.dropout(sublayer(self.norm(x)))
 
 class EncoderLayer(nn.Module):
 
@@ -23,7 +23,7 @@ class EncoderLayer(nn.Module):
 
     def forward(self, src_encs, src_mask):
         src_encs = self.sublayers[0](src_encs,
-            lambda inputs: self.self_att(inputs, inputs, inputs, src_mask))
+            lambda x: self.self_att(x, x, x, src_mask))
         return self.sublayers[1](src_encs, self.ff)
 
 class Encoder(nn.Module):
@@ -51,9 +51,9 @@ class DecoderLayer(nn.Module):
 
     def forward(self, tgt_encs, tgt_mask, src_encs, src_mask):
         tgt_encs = self.sublayers[0](tgt_encs,
-            lambda inputs: self.self_att(inputs, inputs, inputs, tgt_mask))
+            lambda x: self.self_att(x, x, x, tgt_mask))
         tgt_encs = self.sublayers[1](tgt_encs,
-            lambda inputs: self.crss_att(inputs, src_encs, src_encs, src_mask))
+            lambda x: self.crss_att(x, src_encs, src_encs, src_mask))
         return self.sublayers[2](tgt_encs, self.ff)
 
 class Decoder(nn.Module):
@@ -78,10 +78,10 @@ class Model(nn.Module):
         self.decoder = Decoder(embed_dim, ff_dim, num_heads, num_layers, dropout)
         self.src_embed = nn.Sequential(Embedding(vocab_dim, embed_dim), PositionalEncoding(embed_dim, dropout))
         self.tgt_embed = nn.Sequential(Embedding(vocab_dim, embed_dim), PositionalEncoding(embed_dim, dropout))
-        self.generator = LogSoftmax(embed_dim, vocab_dim)
-        del self.src_embed[0].weights, self.tgt_embed[0].weights
-        self.src_embed[0].weights = self.generator.weights
-        self.tgt_embed[0].weights = self.generator.weights
+        self.generator = Generator(embed_dim, vocab_dim)
+        del self.src_embed[0].weight, self.tgt_embed[0].weight
+        self.src_embed[0].weight = self.generator.weight
+        self.tgt_embed[0].weight = self.generator.weight
 
     def encode(self, src_nums, src_mask):
         src_embs = self.src_embed(src_nums)

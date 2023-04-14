@@ -9,4 +9,4 @@ patience            = 3     # number of epochs tolerated w/o improvement
 label_smoothing     = 0.1   # label smoothing (regularization technique)
 batch_size          = 8192  # number of tokens per batch (source/target)
 max_length          = 256   # maximum sentence length (during training)
-beam_width          = 5     # beam search and length normalization
+beam_size           = 5     # beam search decoding (length normalization)

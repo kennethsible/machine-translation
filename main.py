@@ -3,33 +3,38 @@ from score import score_model
 from datetime import timedelta
 import random, torch, time, tqdm, toml
 
-def train_epoch(manager, criterion, optimizer=None, use_tqdm=False, *, mode='train'):
+def train_epoch(manager, criterion, optimizer=None, scalar=None, visualize=False, *, mode='train'):
     data = manager.data if mode == 'train' else manager.test
     model, vocab = manager.model, manager.vocab
+    decoding_size = vocab.size(decoding=True)
 
-    acc_loss, num_tokens = 0., 0
-    for batch in tqdm.tqdm(data) if use_tqdm else data:
+    total_loss, num_tokens = 0., 0
+    for batch in tqdm.tqdm(data) if visualize else data:
         src_nums, src_mask = batch.src_nums, batch.src_mask
         tgt_nums, tgt_mask = batch.tgt_nums, batch.tgt_mask
 
-        logits = model(src_nums, src_mask, tgt_nums[:, :-1], tgt_mask, vocab.split)
-        loss = criterion(torch.flatten(logits, 0, 1), torch.flatten(tgt_nums[:, 1:]))
+        with torch.cuda.amp.autocast():
+            logits = model(src_nums, src_mask, tgt_nums[:, :-1], tgt_mask, decoding_size)
+            loss = criterion(torch.flatten(logits, 0, 1), torch.flatten(tgt_nums[:, 1:]))
 
         if optimizer and mode == 'train':
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            scalar.scale(loss).backward()
+            scalar.step(optimizer)
+            scalar.update()
 
-        acc_loss += loss.item()
+        total_loss += loss.item()
         num_tokens += batch.num_tokens
         del logits, loss
-    return acc_loss / num_tokens
 
-def train_model(manager, logger, use_tqdm=False):
+    return total_loss / num_tokens
+
+def train_model(manager, logger, visualize=False):
     model, vocab = manager.model, manager.vocab
     criterion = torch.nn.CrossEntropyLoss(ignore_index=vocab.PAD,
         label_smoothing=manager.label_smoothing)
     optimizer = torch.optim.Adam(model.parameters(), lr=manager.lr)
+    scalar = torch.cuda.amp.GradScaler()
 
     i, best_loss = 0, torch.inf
     for epoch in range(manager.max_epochs):
@@ -37,7 +42,7 @@ def train_model(manager, logger, use_tqdm=False):
 
         model.train()
         start = time.perf_counter()
-        train_loss = train_epoch(manager, criterion, optimizer, use_tqdm)
+        train_loss = train_epoch(manager, criterion, optimizer, scalar, visualize)
         elapsed = timedelta(seconds=(time.perf_counter() - start))
 
         model.eval()
@@ -45,8 +50,8 @@ def train_model(manager, logger, use_tqdm=False):
             val_loss = train_epoch(manager, criterion, mode='eval')
 
         checkpoint = f'[{str(epoch + 1).rjust(len(str(manager.max_epochs)), "0")}]'
-        checkpoint += f' Training PPL = {torch.exp(train_loss):.4e}'
-        checkpoint += f' | Validation PPL = {torch.exp(val_loss):.4e}'
+        checkpoint += f' Training PPL = {torch.exp(train_loss)}'
+        checkpoint += f' | Validation PPL = {torch.exp(val_loss)}'
         checkpoint += f' | Elapsed Time = {elapsed}'
         logger.info(checkpoint); print()
 
@@ -77,7 +82,8 @@ def main():
     src_lang, tgt_lang = args.lang
     with open('config.toml') as config_file:
         config = toml.load(config_file)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    assert torch.cuda.is_available()
+    device = torch.device('cuda')
 
     for i, arg in enumerate(unknown):
         if arg[:2] == '--' and len(unknown) > i:
@@ -85,9 +91,14 @@ def main():
             config[option] = (int if value.isdigit() else float)(value)
 
     with open(args.vocab) as vocab_file, open(args.codes) as codes_file, \
-        open(args.data) as data_file, open(args.test) as test_file:
+            open(args.data) as data_file, open(args.test) as test_file:
         manager = Manager(src_lang, tgt_lang, vocab_file, codes_file,
             args.model, config, device, data_file, test_file)
+
+    if torch.cuda.get_device_capability()[0] >= 8:
+        torch.set_float32_matmul_precision('high')
+    # if torch.__version__ >= '2.0':
+    #     manager.model = torch.compile(manager.model)
 
     logger = logging.getLogger('torch.logger')
     logger.addHandler(logging.FileHandler(args.model + '.log'))

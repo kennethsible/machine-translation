@@ -83,17 +83,17 @@ class MultiHeadAttention(nn.Module):
         assert embed_dim % num_heads == 0
         self.linears = clone(Linear(embed_dim, embed_dim), 4)
         self.dropout = nn.Dropout(dropout)
-        self.key_dim = embed_dim // num_heads
+        self.head_dim = embed_dim // num_heads
         self.num_heads = num_heads
 
     def attention(self, query, key, value, mask=None):
-        scores = query @ key.transpose(-2, -1) / math.sqrt(self.key_dim)
+        scores = query @ key.transpose(-2, -1) / math.sqrt(self.head_dim)
         if mask is not None:
             scores.masked_fill_(mask.unsqueeze(1) == 0, -torch.inf)
         return self.dropout(scores.softmax(dim=-1)) @ value
 
     def _reshape_from(self, x):
-        return x.reshape(*x.size()[:2], self.num_heads, self.key_dim)
+        return x.reshape(*x.size()[:2], self.num_heads, self.head_dim)
 
     def _reshape_to(self, x):
         return x.reshape(*x.size()[:2], -1)

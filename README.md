@@ -3,12 +3,12 @@
 
 Note, any option in `model.config` can also be passed as a command line argument,
 ```
-$ python translate.py --string "..." --model model.deen --beam_width 5
+$ python translate.py --model model.deen --beam_size 10 --string "..."
 ```
 
 and any output from `stdout` can be diverted using the output redirection operator.
 ```
-$ python translate.py --file infile.de --model model.deen > outfile.en
+$ python translate.py --model model.deen --data infile.de > outfile.en
 ```
 
 ## Train Model
@@ -29,23 +29,23 @@ optional arguments:
 
 ## Score Model
 ```
-usage: score.py [-h] --data FILE --model FILE
+usage: score.py [-h] --model FILE --data FILE
 
 optional arguments:
   -h, --help    show this help message and exit
-  --data FILE   testing data
   --model FILE  load model
+  --data FILE   testing data
 ```
 
 ## Translate Input
 ```
-usage: translate.py [-h] (--file FILE | --string STRING) --model FILE
+usage: translate.py [-h] --model FILE (--file FILE | --string STRING)
 
 optional arguments:
   -h, --help       show this help message and exit
-  --file FILE      translate file
-  --string STRING  translate string
   --model FILE     load model
+  --file FILE      file input
+  --string STRING  string input
 ```
 
 ## Model Configuration (Default)
@@ -59,7 +59,7 @@ max_epochs          = 250   # maximum number of epochs (halt training)
 lr                  = 3e-4  # learning rate (step size of the optimizer)
 patience            = 3     # number of epochs tolerated w/o improvement
 label_smoothing     = 0.1   # label smoothing (regularization technique)
-batch_size          = 8192  # number of tokens per batch (source/target)
+batch_size          = 4096  # number of tokens per batch (source/target)
 max_length          = 256   # maximum sentence length (during training)
 beam_size           = 5     # beam search decoding (length normalization)
 ```

@@ -119,37 +119,30 @@ with open('$3/data.tok.bpe.$2') as tgt_file:
     for line in tgt_file.readlines():
         tgt_data.update(line.split())
 
-src_only, tgt_only, src_tgt = [], [], []
+# <UNK> SRC-TGT <EOS> TGT-ONLY <BOS> SRC-ONLY <PAD>
+src_tgt, src_only, tgt_only = ['<UNK>\n'], [], []
 with open('data/vocab.$1$2') as vocab_file:
     for line in vocab_file.readlines():
-        token = line.split()[0]
-        in_src = token in src_data
-        in_tgt = token in tgt_data
-        token += '\n'
-
-        if in_src and not in_tgt:
-            src_only.append(token)
-        elif in_tgt and not in_src:
-            tgt_only.append(token)
+        word = line.split()[0]
+        in_src, in_tgt = word in src_data, word in tgt_data
+        if in_src and in_tgt:
+            src_tgt.append(f'{word}\n')
+        elif in_src:
+            src_only.append(f'{word}\n')
         else:
-            src_tgt.append(token)
+            tgt_only.append(f'{word}\n')
+src_tgt.append('<EOS>\n')
+tgt_only.append('<BOS>\n')
+src_only.append('<PAD>\n')
 
-with open('data/vocab.$1$2', 'w') as vocab_file:
-    tgt_loc = len(src_tgt) + 2
-    src_loc = tgt_loc + len(tgt_only)
-    vocab_file.write(f'#{tgt_loc};{src_loc}\n')
-    vocab_file.writelines(src_tgt)
-    vocab_file.writelines(tgt_only)
-    vocab_file.writelines(src_only)
-
-src_only, tgt_only = tgt_only, src_only
-with open('data/vocab.$2$1', 'w') as vocab_file:
-    tgt_loc = len(src_tgt) + 2
-    src_loc = tgt_loc + len(tgt_only)
-    vocab_file.write(f'#{tgt_loc};{src_loc}\n')
-    vocab_file.writelines(src_tgt)
-    vocab_file.writelines(tgt_only)
-    vocab_file.writelines(src_only)
+for langs in ('$1$2', '$2$1'):
+    with open(f'data/vocab.{langs}', 'w') as vocab_file:
+        tgt_range = len(src_tgt) + len(tgt_only)
+        vocab_file.write(f'#2:{2 + tgt_range}\n')
+        vocab_file.writelines(src_tgt)
+        vocab_file.writelines(tgt_only)
+        vocab_file.writelines(src_only)
+    src_only, tgt_only = tgt_only, src_only
 END
 )"
     eval "$output"

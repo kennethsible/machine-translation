@@ -1,13 +1,12 @@
-from layers import PositionalEncoding, MultiHeadAttention, \
-    Embedding, Generator, FeedForward, ScaleNorm, clone
-import torch, torch.nn as nn
+from layers import Embedding, PositionalEncoding, \
+    FeedForward, ScaleNorm, MultiHeadAttention, clone
+import torch.nn as nn
 
 class SublayerConnection(nn.Module):
 
     def __init__(self, embed_dim, dropout):
         super(SublayerConnection, self).__init__()
-        scale = torch.tensor(embed_dim, dtype=torch.float32)
-        self.norm = ScaleNorm(torch.sqrt(scale))
+        self.norm = ScaleNorm(embed_dim ** 0.5)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, sublayer):
@@ -31,8 +30,10 @@ class Encoder(nn.Module):
     def __init__(self, embed_dim, ff_dim, num_heads, num_layers, dropout):
         super(Encoder, self).__init__()
         self.layers = clone(EncoderLayer(embed_dim, ff_dim, num_heads, dropout), num_layers)
-        scale = torch.tensor(embed_dim, dtype=torch.float32)
-        self.norm = ScaleNorm(torch.sqrt(scale))
+        for p in self.parameters():
+             if p.dim() > 1:
+                 nn.init.xavier_uniform_(p)
+        self.norm = ScaleNorm(embed_dim ** 0.5)
 
     def forward(self, src_embs, src_mask):
         src_encs = src_embs
@@ -61,8 +62,10 @@ class Decoder(nn.Module):
     def __init__(self, embed_dim, ff_dim, num_heads, num_layers, dropout):
         super(Decoder, self).__init__()
         self.layers = clone(DecoderLayer(embed_dim, ff_dim, num_heads, dropout), num_layers)
-        scale = torch.tensor(embed_dim, dtype=torch.float32)
-        self.norm = ScaleNorm(torch.sqrt(scale))
+        for p in self.parameters():
+             if p.dim() > 1:
+                 nn.init.xavier_uniform_(p)
+        self.norm = ScaleNorm(embed_dim ** 0.5)
 
     def forward(self, tgt_embs, tgt_mask, src_encs, src_mask):
         tgt_encs = tgt_embs
@@ -72,16 +75,13 @@ class Decoder(nn.Module):
 
 class Model(nn.Module):
 
-    def __init__(self, vocab_dim, embed_dim, ff_dim, num_heads, num_layers, dropout):
+    def __init__(self, vocab_dim, embed_dim, output_dim, ff_dim, num_heads, num_layers, dropout):
         super(Model, self).__init__()
         self.encoder = Encoder(embed_dim, ff_dim, num_heads, num_layers, dropout)
         self.decoder = Decoder(embed_dim, ff_dim, num_heads, num_layers, dropout)
-        self.src_embed = nn.Sequential(Embedding(vocab_dim, embed_dim), PositionalEncoding(embed_dim, dropout))
-        self.tgt_embed = nn.Sequential(Embedding(vocab_dim, embed_dim), PositionalEncoding(embed_dim, dropout))
-        self.generator = Generator(embed_dim, vocab_dim)
-        del self.src_embed[0].weight, self.tgt_embed[0].weight
-        self.src_embed[0].weight = self.generator.weight
-        self.tgt_embed[0].weight = self.generator.weight
+        self.out_embed = Embedding(embed_dim, vocab_dim, output_dim)
+        self.src_embed = nn.Sequential(self.out_embed, PositionalEncoding(embed_dim, dropout))
+        self.tgt_embed = nn.Sequential(self.out_embed, PositionalEncoding(embed_dim, dropout))
 
     def encode(self, src_nums, src_mask):
         src_embs = self.src_embed(src_nums)
@@ -91,7 +91,7 @@ class Model(nn.Module):
         tgt_embs = self.tgt_embed(tgt_nums)
         return self.decoder(tgt_embs, tgt_mask, src_encs, src_mask)
 
-    def forward(self, src_nums, src_mask, tgt_nums, tgt_mask, output_dim=None, log_softmax=False):
+    def forward(self, src_nums, src_mask, tgt_nums, tgt_mask):
         src_encs = self.encode(src_nums, src_mask)
         tgt_encs = self.decode(tgt_nums, tgt_mask, src_encs, src_mask)
-        return self.generator(tgt_encs, output_dim, log_softmax)
+        return self.out_embed(tgt_encs, inverse=True)

@@ -3,49 +3,50 @@
 
 Note, any option in `model.config` can also be passed as a command line argument,
 ```
-$ python translate.py --model model.deen --beam_size 10 --string "..."
+$ python translate.py --load model.deen --beam-size 10 --string "..."
 ```
 
 and any output from `stdout` can be diverted using the output redirection operator.
 ```
-$ python translate.py --model model.deen --data infile.de > outfile.en
+$ python translate.py --load model.deen --data infile.de > outfile.en
 ```
 
 ## Train Model
 ```
-usage: main.py [-h] [--tqdm] [--seed SEED] --lang SRC TGT --data FILE --test FILE --vocab FILE --codes FILE --model FILE
+usage: main.py [-h] --lang SRC TGT --data FILE --test FILE --vocab FILE --codes FILE --save FILE [--seed SEED] [--tqdm]
 
 optional arguments:
   -h, --help      show this help message and exit
-  --tqdm          enable tqdm
-  --seed SEED     random seed
   --lang SRC TGT  language pair
   --data FILE     training data
   --test FILE     validation data
   --vocab FILE    shared vocab
   --codes FILE    shared codes
-  --model FILE    save model
+  --save FILE     save model
+  --seed SEED     random seed
+  --tqdm          enable tqdm
 ```
 
 ## Score Model
 ```
-usage: score.py [-h] --model FILE --data FILE
+usage: score.py [-h] --data FILE --load FILE [--tqdm]
 
 optional arguments:
-  -h, --help    show this help message and exit
-  --model FILE  load model
-  --data FILE   testing data
+  -h, --help   show this help message and exit
+  --data FILE  testing data
+  --load FILE  load model
+  --tqdm       enable tqdm
 ```
 
 ## Translate Input
 ```
-usage: translate.py [-h] --model FILE (--file FILE | --string STRING)
+usage: translate.py [-h] --load FILE (--file FILE | --string STRING)
 
 optional arguments:
   -h, --help       show this help message and exit
-  --model FILE     load model
-  --file FILE      file input
-  --string STRING  string input
+  --load FILE      load model
+  --file FILE      input file
+  --string STRING  input string
 ```
 
 ## Model Configuration (Default)

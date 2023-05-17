@@ -6,13 +6,19 @@ def clone(module, N):
 
 class Embedding(nn.Module):
 
-    def __init__(self, vocab_dim, embed_dim):
+    def __init__(self, embed_dim, vocab_dim, output_dim=None):
         super(Embedding, self).__init__()
         self.weight = nn.Parameter(torch.empty(vocab_dim, embed_dim))
         nn.init.uniform_(self.weight, -0.01, 0.01)
+        self.scale = embed_dim ** 0.5
+        self.output_dim = output_dim
 
-    def forward(self, x):
-        return nn.functional.normalize(self.weight[x], dim=-1)
+    def forward(self, x, inverse=False):
+        if inverse:
+            weight = self.weight[:self.output_dim]
+            weight = nn.functional.normalize(weight, dim=-1)
+            return x @ weight.transpose(0, 1)
+        return self.scale * nn.functional.normalize(self.weight[x], dim=-1)
 
 class PositionalEncoding(nn.Module):
 
@@ -30,38 +36,12 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         return self.dropout(x + self.enc[:, : x.size(1)])
 
-class Linear(nn.Module):
-
-    def __init__(self, input_dim, output_dim):
-        super(Linear, self).__init__()
-        self.weight = nn.Parameter(torch.empty(input_dim, output_dim))
-        self.bias = nn.Parameter(torch.zeros(output_dim))
-        nn.init.xavier_uniform_(self.weight)
-
-    def forward(self, x, bias=True):
-        if not bias:
-            return x @ self.weight
-        return x @ self.weight + self.bias
-
-class Generator(nn.Module):
-
-    def __init__(self, embed_dim, vocab_dim):
-        super(Generator, self).__init__()
-        self.weight = nn.Parameter(torch.empty(vocab_dim, embed_dim))
-        nn.init.uniform_(self.weight, -0.01, 0.01)
-
-    def forward(self, x, output_dim=None, log_softmax=True):
-        weight = nn.functional.normalize(self.weight[:output_dim], dim=-1)
-        if not log_softmax:
-            return x @ weight.transpose(0, 1)
-        return torch.log_softmax(x @ weight.transpose(0, 1), dim=-1)
-
 class FeedForward(nn.Module):
 
     def __init__(self, embed_dim, ff_dim, dropout):
         super(FeedForward, self).__init__()
-        self.ff_1 = Linear(embed_dim, ff_dim)
-        self.ff_2 = Linear(ff_dim, embed_dim)
+        self.ff_1 = nn.Linear(embed_dim, ff_dim)
+        self.ff_2 = nn.Linear(ff_dim, embed_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -71,17 +51,17 @@ class ScaleNorm(nn.Module):
 
     def __init__(self, scale):
         super(ScaleNorm, self).__init__()
-        self.scale = nn.Parameter(scale)
+        self.scale = nn.Parameter(torch.tensor(scale))
 
-    def forward(self, x):
-        return self.scale * nn.functional.normalize(x, dim=-1)
+    def forward(self, x, eps=1e-5):
+        return self.scale * nn.functional.normalize(x, dim=-1, eps=eps)
 
 class MultiHeadAttention(nn.Module):
 
     def __init__(self, embed_dim, num_heads, dropout):
         super(MultiHeadAttention, self).__init__()
         assert embed_dim % num_heads == 0
-        self.linears = clone(Linear(embed_dim, embed_dim), 4)
+        self.linears = clone(nn.Linear(embed_dim, embed_dim), 4)
         self.dropout = nn.Dropout(dropout)
         self.head_dim = embed_dim // num_heads
         self.num_heads = num_heads

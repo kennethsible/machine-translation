@@ -11,24 +11,22 @@ class Vocab:
     def __init__(self, vocab_file=None):
         self.num_to_word = []
         self.word_to_num = {}
-        self._decoding_size = None
+        self._output_dim = None
         if vocab_file:
             self._from_file(vocab_file)
 
     def _from_file(self, vocab_file):
         line = vocab_file.readline()
         start, end = line.lstrip('#').split(':')
-        decoding_size = int(end) - int(start)
+        self._output_dim = int(end) - int(start)
 
-        for i in range(8 - decoding_size % 8):
+        for i in range(8 - self._output_dim % 8):
             self.add(f'<PAD {i}>')
-        decoding_size += i + 1 if i else 0
+        self._output_dim += i + 1 if i else 0
         for line in vocab_file:
             self.add(line.split()[0])
         for j in range(8 - self.size() % 8):
             self.add(f'<PAD {i + j}>')
-
-        self._decoding_size = decoding_size
 
     @property
     def UNK(self):
@@ -100,9 +98,7 @@ class Vocab:
             end = len(nums)
         return [self.num_to_word[num] for num in nums[start:end]]
 
-    def size(self, decoding=False):
-        if decoding:
-            return self._decoding_size
+    def size(self):
         return len(self.num_to_word)
 
 class Batch:
@@ -123,16 +119,15 @@ class Batch:
 
     @property
     def src_mask(self):
-        if not self.ignore_index:
-            return None
-        return (self.src_nums != self.ignore_index).unsqueeze(-2)
+        if self.ignore_index is not None:
+            return (self.src_nums != self.ignore_index).unsqueeze(-2)
 
     @property
     def tgt_mask(self):
-        if not self.ignore_index:
-            return triu_mask(self.tgt_nums[:, :-1].size(-1))
-        return (self.tgt_nums[:, :-1] != self.ignore_index).unsqueeze(-2) \
-            & triu_mask(self.tgt_nums[:, :-1].size(-1), device=self.device)
+        if self.ignore_index is not None:
+            return triu_mask(self.tgt_nums[:, :-1].size(-1), device=self.device) \
+                & (self.tgt_nums[:, :-1] != self.ignore_index).unsqueeze(-2)
+        return triu_mask(self.tgt_nums[:, :-1].size(-1), device=self.device)
 
     @property
     def num_tokens(self):
@@ -162,6 +157,7 @@ class Manager:
             vocab_file.seek(0)
             self._vocab_file = ''.join(vocab_file.readlines())
         self.vocab = Vocab(StringIO(self._vocab_file))
+
         if not isinstance(codes_file, str):
             codes_file.seek(0)
             self._codes_file = ''.join(codes_file.readlines())
@@ -170,6 +166,7 @@ class Manager:
         self.model = Model(
             self.vocab.size(),
             self.embed_dim,
+            self.vocab._output_dim,
             self.ff_dim,
             self.num_heads,
             self.num_layers,
@@ -221,12 +218,15 @@ class Manager:
 
             if not src_words or not tgt_words: continue
             if self.max_length:
-                if len(src_words) > self.max_length - 2: continue
-                if len(tgt_words) > self.max_length - 2: continue
+                if len(src_words) > self.max_length - 2:
+                    src_words = src_words[:self.max_length]
+                if len(tgt_words) > self.max_length - 2:
+                    tgt_words = tgt_words[:self.max_length]
 
             unbatched.append((
                 ['<BOS>'] + src_words + ['<EOS>'],
                 ['<BOS>'] + tgt_words + ['<EOS>']))
+
         unbatched.sort(key=lambda x: (len(x[0]), len(x[1])), reverse=True)
 
         i = batch_size = 0
@@ -235,7 +235,7 @@ class Manager:
             tgt_len = len(unbatched[i][1])
 
             while True:
-                batch_size = self.batch_size // (max(src_len, tgt_len) * 8) * 8
+                batch_size = 2 ** int(math.log2(self.batch_size // max(src_len, tgt_len)))
     
                 src_batch, tgt_batch = zip(*unbatched[i:(i + batch_size)])
                 max_src_len = max(len(src_words) for src_words in src_batch)
@@ -253,7 +253,7 @@ class Manager:
             tgt_nums = torch.stack([
                 nn.functional.pad(self.vocab.numberize(*tgt_words), (0, max_tgt_len - len(tgt_words)),
                     value=self.vocab.PAD) for tgt_words in tgt_batch])
-            tgt_nums.masked_fill_(tgt_nums >= self.vocab.size(decoding=True), self.vocab.UNK)
+            tgt_nums.masked_fill_(tgt_nums >= self.vocab._output_dim, self.vocab.UNK)
 
             batched.append(Batch(src_nums, tgt_nums, self.device, self.vocab.PAD))
 

@@ -1,7 +1,7 @@
 from comet import download_model, load_from_checkpoint
 from sacrebleu.metrics import BLEU, CHRF
 from manager import Manager
-from decode import beam_search
+from decoder import beam_search
 from datetime import timedelta
 import torch, time, tqdm
 
@@ -16,8 +16,8 @@ def score_model(manager, logger, use_tqdm=False):
             src_encs = model.encode(batch.src_nums, batch.src_mask)
             for i in tqdm.tqdm(range(src_encs.size(0)), leave=False, disable=(not use_tqdm)):
                 out_nums = beam_search(manager, src_encs[i], batch.src_mask[i], manager.beam_size)
-                reference.append(manager.detokenize(vocab.denumberize(*batch.tgt_nums[i])))
-                candidate.append(manager.detokenize(vocab.denumberize(*out_nums)))
+                reference.append(manager.detokenize(vocab.denumberize(batch.tgt_nums[i])[1:-1]))
+                candidate.append(manager.detokenize(vocab.denumberize(out_nums)[1:-1]))
     elapsed = timedelta(seconds=(time.perf_counter() - start))
 
     bleu_score = BLEU().corpus_score(candidate, [reference])
@@ -26,7 +26,7 @@ def score_model(manager, logger, use_tqdm=False):
     samples = []
     for i, batch in enumerate(manager.test):
         for j, src_nums in enumerate(batch.src_nums):
-            src_words = manager.detokenize(vocab.denumberize(*src_nums), manager.src_lang)
+            src_words = manager.detokenize(vocab.denumberize(src_nums)[1:-1], manager.src_lang)
             samples.append({'src': src_words, 'mt': candidate[i + j], 'ref': reference[i + j]})
     comet_model = load_from_checkpoint(download_model('Unbabel/wmt22-comet-da'))
     comet_score = comet_model.predict(samples)['system_score']
@@ -42,12 +42,12 @@ def score_model(manager, logger, use_tqdm=False):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', metavar='FILE', required=True, help='testing data')
-    parser.add_argument('--load', metavar='FILE', required=True, help='load model')
-    parser.add_argument('--tqdm', action='store_true', help='enable tqdm')
+    parser.add_argument('--model', metavar='FILE', required=True, help='model file (.pt)')
+    parser.add_argument('--tqdm', action='store_true', help='use tqdm')
     args, unknown = parser.parse_known_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model_dict = torch.load(args.load, map_location=device)
+    model_dict = torch.load(args.model, map_location=device)
     src_lang, tgt_lang = model_dict['src_lang'], model_dict['tgt_lang']
     vocab_file, codes_file = model_dict['vocab_file'], model_dict['codes_file']
 
@@ -59,7 +59,7 @@ def main():
 
     with open(args.data) as test_file:
         manager = Manager(src_lang, tgt_lang, vocab_file, codes_file,
-            args.load, config, device, data_file=None, test_file=test_file)
+            args.model, config, device, data_file=None, test_file=test_file)
     manager.model.load_state_dict(model_dict['state_dict'])
 
     if torch.cuda.get_device_capability()[0] >= 8:

@@ -26,7 +26,6 @@ def beam_search(manager, src_encs, src_mask, beam_size, max_length=512):
     active = torch.ones(beam_size, dtype=torch.bool, device=device)
     paths = torch.full((beam_size, max_length), vocab.BOS, device=device)
     probs = torch.zeros(beam_size, device=device)
-    output_dim = model.out_embed.output_dim
 
     i, init_size = 0, beam_size
     while (i := i + 1) < max_length and beam_size > 0:
@@ -44,8 +43,8 @@ def beam_search(manager, src_encs, src_mask, beam_size, max_length=512):
                 beam_size = active_count
                 topv, topi = torch.topk(scores.flatten(), beam_size)
 
-        paths[active] = paths[active][topi // output_dim]
-        paths[active, i], probs[active] = topi % output_dim, topv
+        paths[active] = paths[active][topi // vocab.size()]
+        paths[active, i], probs[active] = topi % vocab.size(), topv
 
         terminated = paths[:, i] == vocab.EOS
         probs[terminated] /= i

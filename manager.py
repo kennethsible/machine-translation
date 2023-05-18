@@ -1,102 +1,37 @@
 from sacremoses import MosesTokenizer, MosesDetokenizer
 from subword_nmt.apply_bpe import BPE
-from model import Model
-from decode import triu_mask
 from io import StringIO
+from model import Model
+from decoder import triu_mask
 import torch, math, re
 import torch.nn as nn
 
 class Vocab:
 
     def __init__(self, vocab_file=None):
-        self.num_to_word = []
-        self.word_to_num = {}
-        self._output_dim = None
+        self.num_to_word = ['<UNK>', '<BOS>', '<EOS>', '<PAD>']
+        self.word_to_num = {x: i for i, x in enumerate(self.num_to_word)}
+
+        self.UNK = self.word_to_num['<UNK>']
+        self.BOS = self.word_to_num['<BOS>']
+        self.EOS = self.word_to_num['<EOS>']
+        self.PAD = self.word_to_num['<PAD>']
+        self.word_to_num.setdefault(self.UNK)
+
         if vocab_file:
-            self._from_file(vocab_file)
-
-    def _from_file(self, vocab_file):
-        line = vocab_file.readline()
-        start, end = line.lstrip('#').split(':')
-        self._output_dim = int(end) - int(start)
-
-        for i in range(8 - self._output_dim % 8):
-            self.add(f'<PAD {i}>')
-        self._output_dim += i + 1 if i else 0
-        for line in vocab_file:
-            self.add(line.split()[0])
-        for j in range(8 - self.size() % 8):
-            self.add(f'<PAD {i + j}>')
-
-    @property
-    def UNK(self):
-        try:
-            return self.word_to_num['<UNK>']
-        except ValueError:
-            self.add('<UNK>')
-        return self.word_to_num['<UNK>']
-
-    @property
-    def BOS(self):
-        try:
-            return self.word_to_num['<BOS>']
-        except ValueError:
-            self.add('<BOS>')
-        return self.word_to_num['<BOS>']
-
-    @property
-    def EOS(self):
-        try:
-            return self.word_to_num['<EOS>']
-        except ValueError:
-            self.add('<EOS>')
-        return self.word_to_num['<EOS>']
-
-    @property
-    def PAD(self):
-        try:
-            return self.word_to_num['<PAD>']
-        except ValueError:
-            self.add('<PAD>')
-        return self.word_to_num['<PAD>']
+            for line in vocab_file:
+                self.add(line.split()[0])
 
     def add(self, word):
-        try:
+        if word not in self.word_to_num:
             self.word_to_num[word] = self.size()
-        except ValueError:
-            pass
-        else:
-            self.num_to_word.append(word)      
+            self.num_to_word.append(word)
 
-    def remove(self, word):
-        try:
-            self.word_to_num.pop(word)
-        except KeyError:
-            pass
-        else:
-            self.num_to_word.remove(word)
+    def numberize(self, words):
+        return [self.word_to_num[word] for word in words]
 
-    def numberize(self, *words, as_list=False):
-        nums = []
-        for word in words:
-            try:
-                nums.append(self.word_to_num[word])
-            except KeyError:
-                nums.append(self.UNK)
-        return nums if as_list else torch.tensor(nums)
-
-    def denumberize(self, *nums, verbatim=False):
-        if verbatim:
-            return [self.num_to_word[num] for num in nums]
-        try:
-            start = nums.index(self.BOS) + 1
-        except ValueError:
-            start = 0
-        try:
-            end = nums.index(self.EOS)
-        except ValueError:
-            end = len(nums)
-        return [self.num_to_word[num] for num in nums[start:end]]
+    def denumberize(self, nums):
+        return [self.num_to_word[num] for num in nums]
 
     def size(self):
         return len(self.num_to_word)
@@ -119,7 +54,7 @@ class Batch:
 
     @property
     def src_mask(self):
-        if self.ignore_index is not None:
+        if self.ignore_index is not None: # TODO RETURN TYPE
             return (self.src_nums != self.ignore_index).unsqueeze(-2)
 
     @property
@@ -130,8 +65,8 @@ class Batch:
         return triu_mask(self.tgt_nums[:, :-1].size(-1), device=self.device)
 
     @property
-    def num_tokens(self):
-        if not self.ignore_index:
+    def num_tokens(self): # TODO tokens
+        if not self.ignore_index: # TODO None
             return self.tgt_nums[:, 1:].sum()
         return (self.tgt_nums[:, 1:] != self.ignore_index).sum()
 
@@ -153,39 +88,32 @@ class Manager:
         for option, value in config.items():
             self.__setattr__(option, value)
 
-        if not isinstance(vocab_file, str):
-            vocab_file.seek(0)
-            self._vocab_file = ''.join(vocab_file.readlines())
-        self.vocab = Vocab(StringIO(self._vocab_file))
+        if not isinstance(vocab_file, list):
+            self._vocab_file = list(vocab_file.readlines())
+        self.vocab = Vocab(self._vocab_file)
 
-        if not isinstance(codes_file, str):
-            codes_file.seek(0)
-            self._codes_file = ''.join(codes_file.readlines())
-        self.codes = BPE(StringIO(self._codes_file))
+        if not isinstance(codes_file, list):
+            self._codes_file = list(codes_file.readlines())
+        self.codes = BPE(StringIO(''.join(self._codes_file)))
 
         self.model = Model(
             self.vocab.size(),
             self.embed_dim,
-            self.vocab._output_dim,
             self.ff_dim,
             self.num_heads,
-            self.num_layers,
-            self.dropout
+            self.dropout,
+            self.num_layers
         ).to(device)
 
         if data_file:
-            data_file.seek(0)
             self.data = self.batch_data(data_file)
             assert len(self.data) > 0
-        else:
-            self.data = None
+        else: self.data = None
 
         if test_file:
-            test_file.seek(0)
             self.test = self.batch_data(test_file)
             assert len(self.test) > 0
-        else:
-            self.test = None
+        else: self.test = None
 
     def tokenize(self, string, lang=None):
         if lang is None:
@@ -235,8 +163,9 @@ class Manager:
             tgt_len = len(unbatched[i][1])
 
             while True:
-                batch_size = 2 ** int(math.log2(self.batch_size // max(src_len, tgt_len)))
-    
+                batch_size = self.batch_size // max(src_len, tgt_len)
+                batch_size = 2 ** math.floor(math.log2(batch_size))
+
                 src_batch, tgt_batch = zip(*unbatched[i:(i + batch_size)])
                 max_src_len = max(len(src_words) for src_words in src_batch)
                 max_tgt_len = max(len(tgt_words) for tgt_words in tgt_batch)
@@ -247,14 +176,10 @@ class Manager:
             max_src_len = math.ceil(max_src_len / 8) * 8
             max_tgt_len = math.ceil(max_tgt_len / 8) * 8
 
-            src_nums = torch.stack([
-                nn.functional.pad(self.vocab.numberize(*src_words), (0, max_src_len - len(src_words)),
-                    value=self.vocab.PAD) for src_words in src_batch])
-            tgt_nums = torch.stack([
-                nn.functional.pad(self.vocab.numberize(*tgt_words), (0, max_tgt_len - len(tgt_words)),
-                    value=self.vocab.PAD) for tgt_words in tgt_batch])
-            tgt_nums.masked_fill_(tgt_nums >= self.vocab._output_dim, self.vocab.UNK)
-
+            src_nums = torch.stack([nn.functional.pad(torch.tensor(self.vocab.numberize(src_words)),
+                (0, max_src_len - len(src_words)), value=self.vocab.PAD) for src_words in src_batch])
+            tgt_nums = torch.stack([nn.functional.pad(torch.tensor(self.vocab.numberize(tgt_words)),
+                (0, max_tgt_len - len(tgt_words)), value=self.vocab.PAD) for tgt_words in tgt_batch])
             batched.append(Batch(src_nums, tgt_nums, self.device, self.vocab.PAD))
 
         return batched

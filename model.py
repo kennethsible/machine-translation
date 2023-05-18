@@ -16,18 +16,18 @@ class EncoderLayer(nn.Module):
 
     def __init__(self, embed_dim, ff_dim, num_heads, dropout):
         super(EncoderLayer, self).__init__()
-        self.self_att = MultiHeadAttention(embed_dim, num_heads, dropout)
+        self.self_attn = MultiHeadAttention(embed_dim, num_heads, dropout)
         self.ff = FeedForward(embed_dim, ff_dim, dropout)
         self.sublayers = clone(SublayerConnection(embed_dim, dropout), 2)
 
     def forward(self, src_encs, src_mask):
         src_encs = self.sublayers[0](src_encs,
-            lambda x: self.self_att(x, x, x, src_mask))
+            lambda x: self.self_attn(x, x, x, src_mask))
         return self.sublayers[1](src_encs, self.ff)
 
 class Encoder(nn.Module):
 
-    def __init__(self, embed_dim, ff_dim, num_heads, num_layers, dropout):
+    def __init__(self, embed_dim, ff_dim, num_heads, dropout, num_layers):
         super(Encoder, self).__init__()
         self.layers = clone(EncoderLayer(embed_dim, ff_dim, num_heads, dropout), num_layers)
         for p in self.parameters():
@@ -45,21 +45,21 @@ class DecoderLayer(nn.Module):
 
     def __init__(self, embed_dim, ff_dim, num_heads, dropout):
         super(DecoderLayer, self).__init__()
-        self.self_att = MultiHeadAttention(embed_dim, num_heads, dropout)
-        self.crss_att = MultiHeadAttention(embed_dim, num_heads, dropout)
+        self.self_attn = MultiHeadAttention(embed_dim, num_heads, dropout)
+        self.crss_attn = MultiHeadAttention(embed_dim, num_heads, dropout)
         self.ff = FeedForward(embed_dim, ff_dim, dropout)
         self.sublayers = clone(SublayerConnection(embed_dim, dropout), 3)
 
     def forward(self, tgt_encs, tgt_mask, src_encs, src_mask):
         tgt_encs = self.sublayers[0](tgt_encs,
-            lambda x: self.self_att(x, x, x, tgt_mask))
+            lambda x: self.self_attn(x, x, x, tgt_mask))
         tgt_encs = self.sublayers[1](tgt_encs,
-            lambda x: self.crss_att(x, src_encs, src_encs, src_mask))
+            lambda x: self.crss_attn(x, src_encs, src_encs, src_mask))
         return self.sublayers[2](tgt_encs, self.ff)
 
 class Decoder(nn.Module):
 
-    def __init__(self, embed_dim, ff_dim, num_heads, num_layers, dropout):
+    def __init__(self, embed_dim, ff_dim, num_heads, dropout, num_layers):
         super(Decoder, self).__init__()
         self.layers = clone(DecoderLayer(embed_dim, ff_dim, num_heads, dropout), num_layers)
         for p in self.parameters():
@@ -75,11 +75,11 @@ class Decoder(nn.Module):
 
 class Model(nn.Module):
 
-    def __init__(self, vocab_dim, embed_dim, output_dim, ff_dim, num_heads, num_layers, dropout):
+    def __init__(self, vocab_dim, embed_dim, ff_dim, num_heads, dropout, num_layers):
         super(Model, self).__init__()
-        self.encoder = Encoder(embed_dim, ff_dim, num_heads, num_layers, dropout)
-        self.decoder = Decoder(embed_dim, ff_dim, num_heads, num_layers, dropout)
-        self.out_embed = Embedding(embed_dim, vocab_dim, output_dim)
+        self.encoder = Encoder(embed_dim, ff_dim, num_heads, dropout, num_layers)
+        self.decoder = Decoder(embed_dim, ff_dim, num_heads, dropout, num_layers)
+        self.out_embed = Embedding(embed_dim, vocab_dim)
         self.src_embed = nn.Sequential(self.out_embed, PositionalEncoding(embed_dim, dropout))
         self.tgt_embed = nn.Sequential(self.out_embed, PositionalEncoding(embed_dim, dropout))
 

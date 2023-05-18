@@ -107,47 +107,6 @@ cat "data/training/data.tok.$src_lang" "data/training/data.tok.$tgt_lang" \
     | subword-nmt learn-bpe -s $merge_ops -o "data/codes.$src_lang$tgt_lang"
 cp "data/codes.$src_lang$tgt_lang" "data/codes.$tgt_lang$src_lang"
 
-function build_vocab {
-    output="$(python - << END
-src_data = set()
-with open('$3/data.tok.bpe.$1') as src_file:
-    for line in src_file.readlines():
-        src_data.update(line.split())
-
-tgt_data = set()
-with open('$3/data.tok.bpe.$2') as tgt_file:
-    for line in tgt_file.readlines():
-        tgt_data.update(line.split())
-
-# <UNK> SRC-TGT <EOS> TGT-ONLY <BOS> SRC-ONLY <PAD>
-src_tgt, src_only, tgt_only = ['<UNK>\n'], [], []
-with open('data/vocab.$1$2') as vocab_file:
-    for line in vocab_file.readlines():
-        word = line.split()[0]
-        in_src, in_tgt = word in src_data, word in tgt_data
-        if in_src and in_tgt:
-            src_tgt.append(f'{word}\n')
-        elif in_src:
-            src_only.append(f'{word}\n')
-        else:
-            tgt_only.append(f'{word}\n')
-src_tgt.append('<EOS>\n')
-tgt_only.append('<BOS>\n')
-src_only.append('<PAD>\n')
-
-for langs in ('$1$2', '$2$1'):
-    with open(f'data/vocab.{langs}', 'w') as vocab_file:
-        tgt_range = len(src_tgt) + len(tgt_only)
-        vocab_file.write(f'#2:{2 + tgt_range}\n')
-        vocab_file.writelines(src_tgt)
-        vocab_file.writelines(tgt_only)
-        vocab_file.writelines(src_only)
-    src_only, tgt_only = tgt_only, src_only
-END
-)"
-    eval "$output"
-}
-
 echo -e "\n[8/10] Applying BPE Subword Tokenization..."
 for path in "data/training" "data/validation" "data/testing"; do
     subword-nmt apply-bpe -c "data/codes.$src_lang$tgt_lang" < "$path/data.tok.$src_lang" > "$path/data.tok.bpe.$src_lang"
@@ -155,7 +114,7 @@ for path in "data/training" "data/validation" "data/testing"; do
 done
 cat "data/training/data.tok.bpe.$src_lang" "data/training/data.tok.bpe.$tgt_lang" \
     | subword-nmt get-vocab > "data/vocab.$src_lang$tgt_lang"
-build_vocab "$src_lang" "$tgt_lang" "data/training"
+cp "data/vocab.$src_lang$tgt_lang" "data/vocab.$tgt_lang$src_lang"
 wc -l "data/vocab.$src_lang$tgt_lang"
 
 echo -e "\n[9/10] Combining Source and Target Data..."

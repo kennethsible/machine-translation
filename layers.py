@@ -6,18 +6,15 @@ def clone(module, N):
 
 class Embedding(nn.Module):
 
-    def __init__(self, embed_dim, vocab_dim, output_dim=None):
+    def __init__(self, embed_dim, vocab_dim):
         super(Embedding, self).__init__()
         self.weight = nn.Parameter(torch.empty(vocab_dim, embed_dim))
         nn.init.uniform_(self.weight, -0.01, 0.01)
         self.scale = embed_dim ** 0.5
-        self.output_dim = output_dim
 
     def forward(self, x, inverse=False):
         if inverse:
-            weight = self.weight[:self.output_dim]
-            weight = nn.functional.normalize(weight, dim=-1)
-            return x @ weight.transpose(0, 1)
+            return x @ nn.functional.normalize(self.weight, dim=-1).transpose(0, 1)
         return self.scale * nn.functional.normalize(self.weight[x], dim=-1)
 
 class PositionalEncoding(nn.Module):

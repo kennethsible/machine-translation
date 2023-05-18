@@ -3,50 +3,51 @@
 
 Note, any option in `model.config` can also be passed as a command line argument,
 ```
-$ python translate.py --load model.deen --beam-size 10 --string "..."
+$ python translate.py --model model.deen.pt --beam-size 10 "Guten Tag!"
 ```
 
 and any output from `stdout` can be diverted using the output redirection operator.
 ```
-$ python translate.py --load model.deen --data infile.de > outfile.en
+$ python translate.py --model model.deen.pt --file input.de > output.en
 ```
 
 ## Train Model
 ```
-usage: main.py [-h] --lang SRC TGT --data FILE --test FILE --vocab FILE --codes FILE --save FILE [--seed SEED] [--tqdm]
+usage: main.py [-h] --lang SRC TGT --data FILE --test FILE --vocab FILE --codes FILE --model FILE --config FILE [--seed SEED] [--tqdm]
 
 optional arguments:
   -h, --help      show this help message and exit
   --lang SRC TGT  language pair
   --data FILE     training data
-  --test FILE     validation data
-  --vocab FILE    shared vocab
-  --codes FILE    shared codes
-  --save FILE     save model
+  --test FILE     testing data
+  --vocab FILE    vocab file (shared)
+  --codes FILE    codes file (shared)
+  --model FILE    model file (.pt)
+  --config FILE   config file (.toml)
   --seed SEED     random seed
-  --tqdm          enable tqdm
+  --tqdm          use tqdm
 ```
 
 ## Score Model
 ```
-usage: score.py [-h] --data FILE --load FILE [--tqdm]
+usage: score.py [-h] --data FILE --model FILE [--tqdm]
 
 optional arguments:
-  -h, --help   show this help message and exit
-  --data FILE  testing data
-  --load FILE  load model
-  --tqdm       enable tqdm
+  -h, --help    show this help message and exit
+  --data FILE   testing data
+  --model FILE  model file (.pt)
+  --tqdm        use tqdm
 ```
 
 ## Translate Input
 ```
-usage: translate.py [-h] --load FILE (--file FILE | --string STRING)
+usage: translate.py [-h] --model FILE (--string STRING | --file FILE)
 
 optional arguments:
   -h, --help       show this help message and exit
-  --load FILE      load model
-  --file FILE      input file
+  --model FILE     model file (.pt)
   --string STRING  input string
+  --file FILE      input file
 ```
 
 ## Model Configuration (Default)
@@ -54,12 +55,15 @@ optional arguments:
 embed_dim           = 512   # dimensions of embedding sublayers
 ff_dim              = 2048  # dimensions of feed-forward sublayers
 num_heads           = 8     # number of parallel attention heads
+dropout             = 0.1   # dropout for emb/ff/attn sublayers
 num_layers          = 6     # number of encoder/decoder layers
-dropout             = 0.1   # dropout for feed-forward/attention sublayers
-max_epochs          = 250   # maximum number of epochs (halt training)
+max_epochs          = 250   # maximum number of epochs, halt training
 lr                  = 3e-4  # learning rate (step size of the optimizer)
 patience            = 3     # number of epochs tolerated w/o improvement
+decay_factor        = 0.8   # if patience reached, lr *= decay_factor
+min_lr              = 5e-5  # minimum learning rate, halt training
 label_smoothing     = 0.1   # label smoothing (regularization technique)
+clip_grad           = 1.0   # maximum allowed value of gradients
 batch_size          = 4096  # number of tokens per batch (source/target)
 max_length          = 256   # maximum sentence length (during training)
 beam_size           = 5     # beam search decoding (length normalization)

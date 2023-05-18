@@ -1,5 +1,5 @@
 from manager import Manager
-from decode import beam_search
+from decoder import beam_search
 import torch
 
 def translate_file(data_file, manager):
@@ -11,18 +11,18 @@ def translate_string(string, manager):
 
     model.eval()
     with torch.no_grad():
-        src_nums, src_mask = vocab.numberize(*src_words).unsqueeze(0), None
-        src_encs = model.encode(src_nums.to(device), src_mask)
+        src_nums, src_mask = torch.tensor(vocab.numberize(src_words)), None
+        src_encs = model.encode(src_nums.unsqueeze(0).to(device), src_mask)
         out_nums = beam_search(manager, src_encs, src_mask, manager.beam_size)
 
-    return manager.detokenize(vocab.denumberize(*out_nums))
+    return manager.detokenize(vocab.denumberize(out_nums)[1:-1])
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--load', metavar='FILE', required=True, help='load model')
+    parser.add_argument('--model', metavar='FILE', required=True, help='model file (.pt)')
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--file', metavar='FILE', help='input file')
     group.add_argument('--string', metavar='STRING', help='input string')
+    group.add_argument('--file', metavar='FILE', help='input file')
     args, unknown = parser.parse_known_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

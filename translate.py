@@ -1,11 +1,12 @@
+from io import TextIOWrapper
 from manager import Manager
 from decoder import beam_search
 import torch
 
-def translate_file(data_file, manager):
+def translate_file(data_file: TextIOWrapper, manager: Manager) -> list[str]:
     return [translate_string(line, manager) for line in data_file]
 
-def translate_string(string, manager):
+def translate_string(string: str, manager: Manager) -> str:
     model, vocab, device = manager.model, manager.vocab, manager.device
     src_words = ['<BOS>'] + manager.tokenize(string).split() + ['<EOS>']
 
@@ -15,7 +16,7 @@ def translate_string(string, manager):
         src_encs = model.encode(src_nums.unsqueeze(0).to(device), src_mask)
         out_nums = beam_search(manager, src_encs, src_mask, manager.beam_size)
 
-    return manager.detokenize(vocab.denumberize(out_nums)[1:-1])
+    return manager.detokenize(vocab.denumberize(out_nums.tolist())[1:-1])
 
 def main():
     parser = argparse.ArgumentParser()
@@ -42,8 +43,6 @@ def main():
 
     if torch.cuda.get_device_capability()[0] >= 8:
         torch.set_float32_matmul_precision('high')
-    # if torch.__version__ >= '2.0':
-    #     manager.model = torch.compile(manager.model)
 
     if args.file:
         data_file = open(args.file)

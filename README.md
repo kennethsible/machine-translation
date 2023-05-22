@@ -1,7 +1,7 @@
 # Neural Machine Translation in PyTorch
 **Ken Sible | [NLP Group](https://nlp.nd.edu)** | **University of Notre Dame**
 
-Note, any option in `model.config` can also be passed as a command line argument,
+Note, any option in `config.toml` can also be passed as a command line argument,
 ```
 $ python translate.py --model model.deen.pt --beam-size 10 "Guten Tag!"
 ```
@@ -13,9 +13,9 @@ $ python translate.py --model model.deen.pt --file input.de > output.en
 
 ## Train Model
 ```
-usage: main.py [-h] --lang SRC TGT --data FILE --test FILE --vocab FILE --codes FILE --model FILE --config FILE [--seed SEED] [--tqdm]
+usage: main.py [-h] --lang SRC TGT --data FILE --test FILE --vocab FILE --codes FILE --model FILE --config FILE --log FILE [--seed SEED] [--tqdm]
 
-optional arguments:
+options:
   -h, --help      show this help message and exit
   --lang SRC TGT  language pair
   --data FILE     training data
@@ -24,26 +24,27 @@ optional arguments:
   --codes FILE    codes file (shared)
   --model FILE    model file (.pt)
   --config FILE   config file (.toml)
+  --log FILE      log file (.md)
   --seed SEED     random seed
-  --tqdm          use tqdm
+  --tqdm          import tqdm
 ```
 
 ## Score Model
 ```
 usage: score.py [-h] --data FILE --model FILE [--tqdm]
 
-optional arguments:
+options:
   -h, --help    show this help message and exit
   --data FILE   testing data
   --model FILE  model file (.pt)
-  --tqdm        use tqdm
+  --tqdm        import tqdm
 ```
 
 ## Translate Input
 ```
 usage: translate.py [-h] --model FILE (--string STRING | --file FILE)
 
-optional arguments:
+options:
   -h, --help       show this help message and exit
   --model FILE     model file (.pt)
   --string STRING  input string

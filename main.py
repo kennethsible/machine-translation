@@ -1,10 +1,17 @@
+from datetime import timedelta
 from manager import Manager
 from score import score_model
-from datetime import timedelta
-import random, torch, time, tqdm, toml
+import logging, random, torch
+import math, toml, time, tqdm
 
-def train_epoch(manager, criterion, optimizer=None, scaler=None, use_tqdm=False, *, mode='train'):
-    data = manager.data if mode == 'train' else manager.test
+Criterion = torch.nn.CrossEntropyLoss
+Optimizer = torch.optim.Optimizer
+Scaler = torch.cuda.amp.GradScaler
+Logger = logging.Logger
+
+def train_epoch(manager: Manager, criterion: Criterion, optimizer: Optimizer | None = None,
+        scaler: Scaler | None = None, use_tqdm: bool = False) -> float:
+    data = manager.data if optimizer else manager.test
 
     total_loss, num_tokens = 0., 0
     for batch in tqdm.tqdm(data, disable=(not use_tqdm)):
@@ -15,22 +22,25 @@ def train_epoch(manager, criterion, optimizer=None, scaler=None, use_tqdm=False,
             logits = manager.model(src_nums, src_mask, tgt_nums[:, :-1], tgt_mask)
             loss = criterion(torch.flatten(logits, 0, 1), torch.flatten(tgt_nums[:, 1:]))
 
-        if optimizer and mode == 'train':
+        if optimizer and scaler:
             optimizer.zero_grad()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_value_(manager.model.parameters(), manager.clip_grad)
+            torch.nn.utils.clip_grad_norm_(
+                manager.model.parameters(),
+                manager.clip_grad)
             scaler.step(optimizer)
             scaler.update()
 
         total_loss += loss.item()
-        num_tokens += batch.num_tokens
+        num_tokens += batch.length()
         del logits, loss
 
     return total_loss / num_tokens
 
-def train_model(manager, logger, use_tqdm=False):
+def train_model(manager: Manager, logger: Logger, use_tqdm: bool = False) -> tuple[tuple, list[str]]:
     model, vocab = manager.model, manager.vocab
+    assert manager.data and len(manager.data) > 0
     criterion = torch.nn.CrossEntropyLoss(ignore_index=vocab.PAD,
         label_smoothing=manager.label_smoothing)
     optimizer = torch.optim.Adam(model.parameters(), lr=manager.lr)
@@ -49,12 +59,12 @@ def train_model(manager, logger, use_tqdm=False):
 
         model.eval()
         with torch.no_grad():
-            val_loss = train_epoch(manager, criterion, mode='eval')
+            val_loss = train_epoch(manager, criterion, use_tqdm=use_tqdm)
         scheduler.step(val_loss)
 
         checkpoint = f'[{str(epoch + 1).rjust(len(str(manager.max_epochs)), "0")}]'
-        checkpoint += f' Training PPL = {torch.exp(train_loss):.16f}'
-        checkpoint += f' | Validation PPL = {torch.exp(val_loss):.16f}'
+        checkpoint += f' Training PPL = {math.exp(train_loss):.16f}'
+        checkpoint += f' | Validation PPL = {math.exp(val_loss):.16f}'
         checkpoint += f' | Learning Rate = {optimizer.param_groups[0]["lr"]:.16f}'
         checkpoint += f' | Elapsed Time = {elapsed}'
         logger.info(checkpoint); print()
@@ -76,8 +86,9 @@ def main():
     parser.add_argument('--codes', metavar='FILE', required=True, help='codes file (shared)')
     parser.add_argument('--model', metavar='FILE', required=True, help='model file (.pt)')
     parser.add_argument('--config', metavar='FILE', required=True, help='config file (.toml)')
+    parser.add_argument('--log', metavar='FILE', required=True, help='log file (.md)')
     parser.add_argument('--seed', type=int, help='random seed')
-    parser.add_argument('--tqdm', action='store_true', help='use tqdm')
+    parser.add_argument('--tqdm', action='store_true', help='import tqdm')
     args, unknown = parser.parse_known_args()
 
     if args.seed:
@@ -102,15 +113,12 @@ def main():
 
     if torch.cuda.get_device_capability()[0] >= 8:
         torch.set_float32_matmul_precision('high')
-    # if torch.__version__ >= '2.0':
-    #     manager.model = torch.compile(manager.model)
 
-    log_file = args.model.rstrip('.pt') + '.log'
     logger = logging.getLogger('torch.logger')
-    logger.addHandler(logging.FileHandler(log_file))
+    logger.addHandler(logging.FileHandler(args.log))
 
     train_model(manager, logger, args.tqdm)
 
 if __name__ == '__main__':
-    import argparse, logging, sys
+    import argparse
     main()

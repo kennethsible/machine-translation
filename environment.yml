@@ -1,0 +1,15 @@
+name: pytorch
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10
+  - pytorch
+  - pytorch-cuda=11.7
+  - sacremoses
+  - sacrebleu
+  - tqdm
+  - pip:
+    - subword-nmt
+    - unbabel-comet

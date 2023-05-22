@@ -1,12 +1,15 @@
-import warnings, torch
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from manager import Manager
+import torch
 
-warnings.filterwarnings('ignore', category=UserWarning)
+Tensor = torch.Tensor
 
-def triu_mask(size, device=None):
+def triu_mask(size: int, device: str | None = None) -> Tensor:
     mask = torch.ones((1, size, size), device=device)
     return torch.triu(mask, diagonal=1) == 0
 
-def greedy_search(manager, src_encs, src_mask, max_length=512):
+def greedy_search(manager: 'Manager', src_encs: Tensor, src_mask: Tensor | None, max_length: int = 512) -> Tensor:
     model, vocab, device = manager.model, manager.vocab, manager.device
     tgt_mask = triu_mask(max_length, device=device)
     path = torch.full((1, max_length), vocab.BOS, device=device)
@@ -20,7 +23,7 @@ def greedy_search(manager, src_encs, src_mask, max_length=512):
 
     return path.squeeze(0)
 
-def beam_search(manager, src_encs, src_mask, beam_size, max_length=512):
+def beam_search(manager: 'Manager', src_encs: Tensor, src_mask: Tensor | None, beam_size: int, max_length: int = 512) -> Tensor:
     model, vocab, device = manager.model, manager.vocab, manager.device
     tgt_mask = triu_mask(max_length, device=device)
     active = torch.ones(beam_size, dtype=torch.bool, device=device)
@@ -38,7 +41,7 @@ def beam_search(manager, src_encs, src_mask, beam_size, max_length=512):
         topv, topi = torch.topk(scores.flatten(), beam_size)
         if beam_size < init_size:
             active[~active] |= probs[~active] < topv.max() / i
-            active_count = active.count_nonzero()
+            active_count = int(active.count_nonzero())
             if active_count > beam_size:
                 beam_size = active_count
                 topv, topi = torch.topk(scores.flatten(), beam_size)
@@ -49,6 +52,6 @@ def beam_search(manager, src_encs, src_mask, beam_size, max_length=512):
         terminated = paths[:, i] == vocab.EOS
         probs[terminated] /= i
         active &= ~terminated
-        beam_size = active.count_nonzero()
+        beam_size = int(active.count_nonzero())
 
     return paths[probs.argmax()]

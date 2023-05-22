@@ -1,12 +1,15 @@
 from comet import download_model, load_from_checkpoint
 from sacrebleu.metrics import BLEU, CHRF
+from datetime import timedelta
 from manager import Manager
 from decoder import beam_search
-from datetime import timedelta
-import torch, time, tqdm
+import logging, torch, time, tqdm
 
-def score_model(manager, logger, use_tqdm=False):
+Logger = logging.Logger
+
+def score_model(manager: Manager, logger: Logger, use_tqdm: bool = False) -> tuple[tuple, list[str]]:
     model, vocab = manager.model, manager.vocab
+    assert manager.test and len(manager.test) > 0
     candidate, reference = [], []
 
     start = time.perf_counter()
@@ -16,8 +19,8 @@ def score_model(manager, logger, use_tqdm=False):
             src_encs = model.encode(batch.src_nums, batch.src_mask)
             for i in tqdm.tqdm(range(src_encs.size(0)), leave=False, disable=(not use_tqdm)):
                 out_nums = beam_search(manager, src_encs[i], batch.src_mask[i], manager.beam_size)
-                reference.append(manager.detokenize(vocab.denumberize(batch.tgt_nums[i])[1:-1]))
-                candidate.append(manager.detokenize(vocab.denumberize(out_nums)[1:-1]))
+                reference.append(manager.detokenize(vocab.denumberize(batch.tgt_nums[i].tolist())[1:-1]))
+                candidate.append(manager.detokenize(vocab.denumberize(out_nums.tolist())[1:-1]))
     elapsed = timedelta(seconds=(time.perf_counter() - start))
 
     bleu_score = BLEU().corpus_score(candidate, [reference])
@@ -37,13 +40,13 @@ def score_model(manager, logger, use_tqdm=False):
     checkpoint += f' | Elapsed Time = {elapsed}'
     logger.info(checkpoint)
 
-    return bleu_score, chrf_score, comet_score, candidate
+    return (bleu_score, chrf_score, comet_score), candidate
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', metavar='FILE', required=True, help='testing data')
     parser.add_argument('--model', metavar='FILE', required=True, help='model file (.pt)')
-    parser.add_argument('--tqdm', action='store_true', help='use tqdm')
+    parser.add_argument('--tqdm', action='store_true', help='import tqdm')
     args, unknown = parser.parse_known_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -64,8 +67,6 @@ def main():
 
     if torch.cuda.get_device_capability()[0] >= 8:
         torch.set_float32_matmul_precision('high')
-    # if torch.__version__ >= '2.0':
-    #     manager.model = torch.compile(manager.model)
 
     logger = logging.getLogger('torch.logger')
 
@@ -73,5 +74,5 @@ def main():
     print('', *candidate, sep='\n')
 
 if __name__ == '__main__':
-    import argparse, logging, sys
+    import argparse
     main()

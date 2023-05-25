@@ -5,10 +5,15 @@ channels:
   - nvidia
 dependencies:
   - python=3.10
+  - pip
   - pytorch
   - pytorch-cuda=11.7
   - sacremoses
   - sacrebleu
+  - isort
+  - black
+  - ruff
+  - mypy
   - tqdm
   - pip:
     - subword-nmt

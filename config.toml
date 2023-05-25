@@ -11,5 +11,5 @@ min_lr              = 5e-5  # minimum learning rate, halt training
 label_smoothing     = 0.1   # label smoothing (regularization technique)
 clip_grad           = 1.0   # maximum allowed value of gradients
 batch_size          = 4096  # number of tokens per batch (source/target)
-max_length          = 256   # maximum sentence length (during training)
+max_length          = 512   # maximum sentence length (during training)
 beam_size           = 4     # beam search decoding (length normalization)

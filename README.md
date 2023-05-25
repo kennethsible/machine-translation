@@ -13,20 +13,20 @@ $ python translate.py --model model.deen.pt --file input.de > output.en
 
 ## Train Model
 ```
-usage: main.py [-h] --lang SRC TGT --data FILE --test FILE --vocab FILE --codes FILE --model FILE --config FILE --log FILE [--seed SEED] [--tqdm]
+usage: main.py [-h] --lang LANG LANG --data FILE --test FILE --vocab FILE --codes FILE --model FILE --config FILE --log FILE [--seed SEED] [--tqdm]
 
 options:
-  -h, --help      show this help message and exit
-  --lang SRC TGT  language pair
-  --data FILE     training data
-  --test FILE     testing data
-  --vocab FILE    vocab file (shared)
-  --codes FILE    codes file (shared)
-  --model FILE    model file (.pt)
-  --config FILE   config file (.toml)
-  --log FILE      log file (.md)
-  --seed SEED     random seed
-  --tqdm          import tqdm
+  -h, --help        show this help message and exit
+  --lang LANG LANG  source/target language
+  --data FILE       training data
+  --test FILE       validation data
+  --vocab FILE      vocab file (shared)
+  --codes FILE      codes file (shared)
+  --model FILE      model file (.pt)
+  --config FILE     config file (.toml)
+  --log FILE        log file (.log)
+  --seed SEED       random seed
+  --tqdm            import tqdm
 ```
 
 ## Score Model
@@ -66,6 +66,6 @@ min_lr              = 5e-5  # minimum learning rate, halt training
 label_smoothing     = 0.1   # label smoothing (regularization technique)
 clip_grad           = 1.0   # maximum allowed value of gradients
 batch_size          = 4096  # number of tokens per batch (source/target)
-max_length          = 256   # maximum sentence length (during training)
-beam_size           = 5     # beam search decoding (length normalization)
+max_length          = 512   # maximum sentence length (during training)
+beam_size           = 4     # beam search decoding (length normalization)
 ```

@@ -35,8 +35,15 @@ class EncoderLayer(nn.Module):
         self.gate = nn.Parameter(torch.empty(1))
         nn.init.normal_(self.gate, mean=1.0, std=0.01)
 
-    def forward(self, src_embs: Tensor, src_encs: Tensor, src_mask: Tensor | None = None) -> Tensor:
-        src_encs = self.gate * src_embs + self.sublayers[0](
+    def forward(
+        self,
+        src_embs: Tensor,
+        src_encs: Tensor,
+        src_mask: Tensor | None = None,
+        residual: bool = True,
+    ) -> Tensor:
+        gate = self.gate if residual else 0.0
+        src_encs = gate * src_embs + self.sublayers[0](
             src_encs, lambda x: self.self_attn(x, x, x, src_mask)
         )
         return self.gate * src_embs + self.sublayers[1](src_encs, self.ff)
@@ -59,8 +66,10 @@ class Encoder(nn.Module):
 
     def forward(self, src_embs: Tensor, src_mask: Tensor | None = None) -> Tensor:
         src_encs = src_embs
-        for layer in self.layers:
-            src_encs = self.rgate * src_encs + self.bgate * layer(src_embs, src_encs, src_mask)
+        for i, layer in enumerate(self.layers):
+            src_encs = self.rgate * src_encs + self.bgate * layer(
+                src_embs, src_encs, src_mask, residual=(i > 0)
+            )
         return self.norm(src_encs)
 
 
@@ -81,9 +90,10 @@ class DecoderLayer(nn.Module):
         tgt_encs: Tensor,
         src_mask: Tensor | None = None,
         tgt_mask: Tensor | None = None,
+        residual: bool = True,
     ) -> Tensor:
-        m = src_encs
-        tgt_encs = self.gate * tgt_embs + self.sublayers[0](
+        m, gate = src_encs, self.gate if residual else 0.0
+        tgt_encs = gate * tgt_embs + self.sublayers[0](
             tgt_encs, lambda x: self.self_attn(x, x, x, tgt_mask)
         )
         tgt_encs = self.gate * tgt_embs + self.sublayers[1](
@@ -115,9 +125,9 @@ class Decoder(nn.Module):
         tgt_mask: Tensor | None = None,
     ) -> Tensor:
         tgt_encs = tgt_embs
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             tgt_encs = self.rgate * tgt_encs + self.bgate * layer(
-                tgt_embs, src_encs, tgt_encs, src_mask, tgt_mask
+                tgt_embs, src_encs, tgt_encs, src_mask, tgt_mask, residual=(i > 0)
             )
         return self.norm(tgt_encs)
 

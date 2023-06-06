@@ -30,6 +30,7 @@ def train_epoch(
     for batch in tqdm(data, disable=(not use_tqdm)):
         src_nums, src_mask = batch.src_nums, batch.src_mask
         tgt_nums, tgt_mask = batch.tgt_nums, batch.tgt_mask
+        batch_length = batch.length()
 
         with torch.cuda.amp.autocast():
             logits = manager.model(src_nums, tgt_nums[:, :-1], src_mask, tgt_mask)
@@ -46,8 +47,8 @@ def train_epoch(
             scaler.step(optimizer)
             scaler.update()
 
-        total_loss += loss.item()
-        num_tokens += batch.length()
+        total_loss += batch_length * loss.item()
+        num_tokens += batch_length
         del logits, loss
 
     return total_loss / num_tokens
